@@ -44,40 +44,10 @@ FROM dessalines/lemmy:nightly@sha256:75d7d7a092c5990926ca49f40c77ff60f6127c35894
 # media tools come from the final Debian image.
 FROM asonix/pictrs:0.5.24 AS pictrs-source
 
-# Stage 4: ImageMagick 7. Debian Bookworm only packages ImageMagick 6,
-# while pict-rs requires the ImageMagick 7 `magick` interface.
-FROM debian:bookworm-slim AS imagemagick-source
-ARG IMAGEMAGICK_VERSION=7.1.1-47
-ARG IMAGEMAGICK_SHA256=818e21a248986f15a6ba0221ab3ccbaed3d3abee4a6feb4609c6f2432a30d7ed
-RUN apt-get update -qq \
- && apt-get install -y --no-install-recommends \
-        build-essential \
-        ca-certificates \
-        curl \
-        libheif-dev \
-        libjpeg62-turbo-dev \
-        libltdl-dev \
-        libpng-dev \
-        libwebp-dev \
-        libxml2-dev \
-        pkg-config \
- && curl -fsSL -o /tmp/imagemagick.tar.gz \
-        "https://github.com/ImageMagick/ImageMagick/archive/refs/tags/${IMAGEMAGICK_VERSION}.tar.gz" \
- && printf '%s  %s\n' "$IMAGEMAGICK_SHA256" /tmp/imagemagick.tar.gz | sha256sum -c - \
- && tar -xzf /tmp/imagemagick.tar.gz -C /tmp \
- && cd "/tmp/ImageMagick-${IMAGEMAGICK_VERSION}" \
- && ./configure \
-        --prefix=/opt/imagemagick \
-        --disable-static \
-        --enable-shared \
-        --without-modules \
-        --without-x \
- && make -j2 \
- && make install
-
-# Stage 5: final image.  Debian bookworm matches the upstream
-# lemmy_server build environment so libpq / glibc versions agree.
-FROM debian:bookworm-slim
+# Stage 4: final image. Debian Trixie packages the ImageMagick 7
+# runtime pict-rs requires. Binaries built on Bookworm remain
+# compatible with Trixie's newer glibc.
+FROM debian:trixie-slim
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -90,7 +60,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 #     We install the python deps via apt where possible so we don't
 #     do a `pip install` in the build (matches the openhost-minio
 #     comment about portable build images).  python3-jwt and
-#     python3-cryptography are in bookworm.
+#     python3-cryptography are in Trixie.
 #   * curl: readiness probes from start.sh.
 #   * tini: PID 1 zombie reaper / signal forwarder.
 #   * gosu: drop privileges to postgres / lemmy users.
@@ -106,13 +76,8 @@ RUN apt-get update -qq \
         python3-bcrypt \
         python3-uvicorn \
         ffmpeg \
+        imagemagick \
         libimage-exiftool-perl \
-        libheif1 \
-        libjpeg62-turbo \
-        libltdl7 \
-        libpng16-16 \
-        libwebp7 \
-        libxml2 \
         curl \
         tini \
         gosu \
@@ -122,13 +87,12 @@ RUN apt-get update -qq \
  && rm -rf /var/lib/apt/lists/* \
  && rm -f /etc/nginx/sites-enabled/default
 
-# PostgreSQL 16 from pgdg.postgresql.org.  Debian Bookworm's apt
-# repo has only PG 15; Lemmy 1.0's migrations include
+# PostgreSQL 16 from pgdg.postgresql.org. Lemmy 1.0's migrations include
 # Postgres-16-only SQL (lateral subqueries with required aliases)
 # and outright fail on PG 15.
 RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
         | gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg \
- && echo "deb http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+ && echo "deb http://apt.postgresql.org/pub/repos/apt trixie-pgdg main" \
         > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update -qq \
  && apt-get install -y --no-install-recommends \
@@ -136,10 +100,7 @@ RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
         postgresql-client-16 \
  && rm -rf /var/lib/apt/lists/*
 
-# Node.js 20 from NodeSource — Debian Bookworm's apt repo only has
-# Node 18, but lemmy-ui's bundled JS uses syntax/APIs that require
-# Node 20+ (older builds crashed on Node 18 with a parse error in
-# dist/js/server.js).
+# Node.js 20 from NodeSource to match the pinned lemmy-ui runtime.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
@@ -148,7 +109,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # build).  Drop into /usr/local/bin where it'll be on PATH.
 COPY --from=backend-source /usr/local/bin/lemmy_server /usr/local/bin/lemmy_server
 COPY --from=pictrs-source /usr/local/bin/pict-rs /usr/local/bin/pict-rs
-COPY --from=imagemagick-source /opt/imagemagick /opt/imagemagick
 
 # lemmy-ui: copy the compiled JS bundle.  We DON'T copy the
 # upstream node binary — that image is Alpine (musl libc) and
@@ -168,9 +128,6 @@ COPY oidc_bridge.py        /opt/openhost-lemmy/oidc_bridge.py
 COPY bootstrap.py          /opt/openhost-lemmy/bootstrap.py
 COPY sso_bounce.py         /opt/openhost-lemmy/sso_bounce.py
 COPY start.sh              /opt/openhost-lemmy/start.sh
-
-ENV PATH="/opt/imagemagick/bin:${PATH}" \
-    LD_LIBRARY_PATH="/opt/imagemagick/lib"
 
 EXPOSE 8080
 
