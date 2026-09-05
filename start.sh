@@ -29,16 +29,21 @@
 
 set -euo pipefail
 
-PERSIST="${OPENHOST_APP_DATA_DIR:-/data/app_data/lemmy}"
-ZONE_DOMAIN="${OPENHOST_ZONE_DOMAIN:-localhost}"
-APP_NAME="${OPENHOST_APP_NAME:-lemmy}"
+PERSIST="${BOTTLE_APP_DATA_DIR:-${OPENHOST_APP_DATA_DIR:-/data/app_data/lemmy}}"
+ZONE_DOMAIN="${BOTTLE_ZONE_DOMAIN:-${OPENHOST_ZONE_DOMAIN:-localhost}}"
+APP_NAME="${BOTTLE_APP_NAME:-${OPENHOST_APP_NAME:-lemmy}}"
 APP_HOST="${APP_NAME}.${ZONE_DOMAIN}"
+PG_PID=""
+LEMMY_PID=""
+UI_PID=""
+BRIDGE_PID=""
+BOUNCE_PID=""
+NGINX_PID=""
+BOOTSTRAP_PID=""
 
 PG_DATA="$PERSIST/postgres"
-PG_LOG_DIR="$PERSIST/log"
-PG_LOG="$PG_LOG_DIR/postgres.log"
-# Lemmy's rendered config carries the DB password AND the admin
-# password in cleartext, so it must NOT live under $PERSIST (which
+# Lemmy's rendered config carries the admin password in cleartext,
+# so it must NOT live under $PERSIST (which
 # file-browser's access_all_data mounts can read).  We render it to
 # a container-local, non-bind-mounted path under /run instead.  The
 # config is re-rendered from the template on every boot, so nothing
@@ -47,8 +52,8 @@ PG_LOG="$PG_LOG_DIR/postgres.log"
 LEMMY_RUNTIME_DIR="/run/lemmy"
 LEMMY_CONFIG="$LEMMY_RUNTIME_DIR/config.hjson"
 rm -f "$PERSIST/config.hjson" 2>/dev/null || true
-PG_PASSWORD_FILE="$PERSIST/postgres-password.txt"
-OIDC_CLIENT_SECRET_FILE="$PERSIST/oidc-client-secret.txt"
+rm -f "$PERSIST/postgres-password.txt" "$PERSIST/oidc-client-secret.txt" 2>/dev/null || true
+rm -rf "$PERSIST/oidc"
 # Legacy artifact from earlier builds: the Lemmy admin (web-login)
 # password used to be persisted here in plaintext, which the
 # file-browser app (access_all_data=true) could read — a real
@@ -58,12 +63,9 @@ OIDC_CLIENT_SECRET_FILE="$PERSIST/oidc-client-secret.txt"
 LEGACY_ADMIN_PASSWORD_FILE="$PERSIST/admin-password.txt"
 rm -f "$LEGACY_ADMIN_PASSWORD_FILE" 2>/dev/null || true
 
-# Lay out persistent dirs with correct ownership.  Postgres
-# specifically needs its data dir + log dir owned by the postgres
-# user; the rest can be owned by lemmy.
-mkdir -p "$PERSIST" "$PG_LOG_DIR"
-chown postgres:postgres "$PG_LOG_DIR"
-chmod 0750 "$PG_LOG_DIR"
+# Lay out persistent storage. Postgres logs to container stderr and
+# keeps only its database cluster under app_data.
+mkdir -p "$PERSIST"
 
 # -----------------------------------------------------------------
 # Postgres bootstrap
@@ -71,12 +73,18 @@ chmod 0750 "$PG_LOG_DIR"
 
 PG_BIN="/usr/lib/postgresql/16/bin"
 
-if [[ ! -f "$PG_PASSWORD_FILE" ]]; then
-    echo "[start.sh] Generating new Postgres password"
-    head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32 > "$PG_PASSWORD_FILE"
-    chmod 0600 "$PG_PASSWORD_FILE"
-fi
-PG_PASSWORD="$(cat "$PG_PASSWORD_FILE")"
+cleanup() {
+    trap - EXIT TERM INT
+    for pid in "$NGINX_PID" "$BOUNCE_PID" "$BRIDGE_PID" "$UI_PID" "$LEMMY_PID" "$BOOTSTRAP_PID"; do
+        [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null || true
+    done
+    if [[ -n "$PG_PID" ]] && kill -0 "$PG_PID" 2>/dev/null; then
+        gosu postgres "$PG_BIN/pg_ctl" -D "$PG_DATA" stop -m fast 2>/dev/null || true
+    fi
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 143' TERM INT
 
 if [[ ! -d "$PG_DATA/base" ]]; then
     echo "[start.sh] First boot: initialising Postgres data dir at $PG_DATA"
@@ -95,7 +103,8 @@ sed -i "s/^#\?listen_addresses.*/listen_addresses = '127.0.0.1'/" "$PG_DATA/post
 sed -i "s/^#\?port .*/port = 5432/"                                 "$PG_DATA/postgresql.conf"
 
 echo "[start.sh] Starting Postgres on 127.0.0.1:5432"
-gosu postgres "$PG_BIN/pg_ctl" -D "$PG_DATA" -l "$PG_LOG" -w start
+gosu postgres "$PG_BIN/postgres" -D "$PG_DATA" &
+PG_PID=$!
 
 # Wait until Postgres is accepting connections.
 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -104,6 +113,10 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     fi
     sleep 1
 done
+if ! gosu postgres "$PG_BIN/pg_isready" -h 127.0.0.1 -p 5432 >/dev/null 2>&1; then
+    echo "[start.sh] Postgres did not become ready within 10 seconds"
+    exit 1
+fi
 
 # Idempotent: create role + DB if absent.  Lemmy 1.0-alpha
 # migrations DROP/recreate system triggers (RI_ConstraintTrigger_*),
@@ -112,19 +125,15 @@ done
 PG_ROLE_EXISTS="$(gosu postgres "$PG_BIN/psql" -tAc "SELECT 1 FROM pg_roles WHERE rolname='lemmy'" || true)"
 if [[ "$PG_ROLE_EXISTS" != "1" ]]; then
     echo "[start.sh] Creating lemmy DB role"
-    gosu postgres "$PG_BIN/psql" -c "CREATE ROLE lemmy LOGIN SUPERUSER PASSWORD '$PG_PASSWORD';"
+    printf '%s\n' "CREATE ROLE lemmy LOGIN SUPERUSER;" | gosu postgres "$PG_BIN/psql"
 else
-    gosu postgres "$PG_BIN/psql" -c "ALTER ROLE lemmy WITH SUPERUSER;" >/dev/null
+    printf '%s\n' "ALTER ROLE lemmy WITH SUPERUSER;" | gosu postgres "$PG_BIN/psql" >/dev/null
 fi
 PG_DB_EXISTS="$(gosu postgres "$PG_BIN/psql" -tAc "SELECT 1 FROM pg_database WHERE datname='lemmy'" || true)"
 if [[ "$PG_DB_EXISTS" != "1" ]]; then
     echo "[start.sh] Creating lemmy DB"
-    gosu postgres "$PG_BIN/psql" -c "CREATE DATABASE lemmy OWNER lemmy;"
+    printf '%s\n' "CREATE DATABASE lemmy OWNER lemmy;" | gosu postgres "$PG_BIN/psql"
 fi
-
-# Always sync the password in case it's been rotated (delete the
-# password file + restart to force).
-gosu postgres "$PG_BIN/psql" -c "ALTER ROLE lemmy WITH PASSWORD '$PG_PASSWORD';" >/dev/null
 
 # -----------------------------------------------------------------
 # Admin password + OIDC client secret
@@ -154,10 +163,10 @@ ADMIN_PASSWORD="$(head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -
 # Usernames: SSO (owner-facing) vs provisioning admin (internal)
 # -----------------------------------------------------------------
 #
-# SSO_USERNAME is the Lemmy username the OpenHost-SSO user takes on
+# SSO_USERNAME is the Lemmy username the Cloud in a Bottle SSO user takes on
 # first sign-in.  We prefer the zone OWNER's actual chosen username
-# (OPENHOST_OWNER_USERNAME, injected by OpenHost — the name they
-# picked at /setup) so the Lemmy account matches their OpenHost
+# (BOTTLE_OWNER_USERNAME, injected by Cloud in a Bottle — the name they
+# picked at /setup) so the Lemmy account matches their Cloud in a Bottle
 # identity, and fall back to "openhost" if it's unset/blank.  Both
 # bootstrap.py (admin promotion) and sso_bounce.py (localStorage
 # prefill) read SSO_USERNAME from the env.
@@ -171,20 +180,19 @@ ADMIN_PASSWORD="$(head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -
 # internal name (rather than "owner") frees the owner to use any
 # normal username — including "owner" — for their SSO account.
 PROVISION_ADMIN_USERNAME="openhost-provisioner"
-SSO_USERNAME="${SSO_USERNAME:-${OPENHOST_OWNER_USERNAME:-openhost}}"
+OWNER_USERNAME="${BOTTLE_OWNER_USERNAME:-${OPENHOST_OWNER_USERNAME:-openhost}}"
+SSO_USERNAME="${SSO_USERNAME:-$OWNER_USERNAME}"
 SSO_USERNAME="${SSO_USERNAME:-openhost}"
 if [[ "$SSO_USERNAME" == "$PROVISION_ADMIN_USERNAME" ]]; then
     echo "[start.sh] owner username collides with reserved provisioner name; using 'openhost' for SSO"
     SSO_USERNAME="openhost"
 fi
-echo "[start.sh] SSO user will be '$SSO_USERNAME' (owner username: '${OPENHOST_OWNER_USERNAME:-<unset>}')"
+echo "[start.sh] SSO user will be '$SSO_USERNAME' (owner username: '$OWNER_USERNAME')"
 
-if [[ ! -f "$OIDC_CLIENT_SECRET_FILE" ]]; then
-    echo "[start.sh] Generating OIDC client secret"
-    head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 48 > "$OIDC_CLIENT_SECRET_FILE"
-    chmod 0600 "$OIDC_CLIENT_SECRET_FILE"
-fi
-OIDC_CLIENT_SECRET="$(cat "$OIDC_CLIENT_SECRET_FILE")"
+# The client secret and signing key rotate on every boot. The provider
+# row is reconciled before nginx starts, and neither value is useful
+# outside this container lifetime.
+OIDC_CLIENT_SECRET="$(head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 48)"
 OIDC_CLIENT_ID="openhost-lemmy"
 
 # -----------------------------------------------------------------
@@ -194,21 +202,17 @@ OIDC_CLIENT_ID="openhost-lemmy"
 # Lemmy + lemmy-ui run as the lemmy user.  Make sure the rest of
 # $PERSIST (excluding postgres dirs) is readable by them.  We do
 # this only on dirs lemmy will read/write so we don't fight the
-# postgres user's exclusive ownership of $PG_DATA / $PG_LOG_DIR.
+# postgres user's exclusive ownership of $PG_DATA.
 chown lemmy:lemmy "$PERSIST"
-for d in "$PERSIST"/oidc; do
-    [[ -e "$d" ]] && chown -R lemmy:lemmy "$d"
-done
 
 # Always re-render so config-template changes after upgrades take
-# effect.  Lemmy reads this on startup.  Rendered to /run (tmpfs-ish
-# container-local storage), never to $PERSIST, so the embedded DB +
-# admin passwords are never exposed to file-browser.
+# effect. Lemmy reads this on startup. Rendered to /run
+# (container-local storage), never to $PERSIST, so the embedded admin
+# password is never exposed to file-browser.
 mkdir -p "$LEMMY_RUNTIME_DIR"
 chmod 0710 "$LEMMY_RUNTIME_DIR"
 chown lemmy:lemmy "$LEMMY_RUNTIME_DIR"
 sed \
-    -e "s|__POSTGRES_PASSWORD__|$PG_PASSWORD|g" \
     -e "s|__HOSTNAME__|$APP_HOST|g" \
     -e "s|__ADMIN_PASSWORD__|$ADMIN_PASSWORD|g" \
     -e "s|__PROVISION_ADMIN_USERNAME__|$PROVISION_ADMIN_USERNAME|g" \
@@ -221,7 +225,6 @@ chmod 0600 "$LEMMY_CONFIG"
 # -----------------------------------------------------------------
 
 echo "[start.sh] Starting lemmy_server on 127.0.0.1:8536"
-LEMMY_DATABASE_URL="postgres://lemmy:$PG_PASSWORD@localhost:5432/lemmy" \
 LEMMY_CONFIG_LOCATION="$LEMMY_CONFIG" \
 RUST_LOG=warn \
 gosu lemmy /usr/local/bin/lemmy_server &
@@ -316,7 +319,7 @@ echo "[start.sh] Starting lemmy-ui on 127.0.0.1:1234"
 UI_PID=$!
 
 # -----------------------------------------------------------------
-# Start OIDC bridge + SSO bouncer
+# Configure OIDC and finish mandatory SSO reconciliation
 # -----------------------------------------------------------------
 
 OIDC_PUBLIC_BASE="https://$APP_HOST"
@@ -328,27 +331,57 @@ OIDC_PUBLIC_BASE="https://$APP_HOST"
 # own public IP), so we keep them on loopback.  See bootstrap.py
 # `_provider_payload` for the full reasoning.
 OIDC_LOOPBACK_BASE="http://127.0.0.1:7000"
-# SSO_USERNAME + PROVISION_ADMIN_USERNAME are defined earlier (in
-# the admin-password section) so the config render can use the
-# provisioning-admin name.
-export OIDC_PUBLIC_BASE
-export OIDC_LOOPBACK_BASE
-export OIDC_CLIENT_ID
-export OIDC_CLIENT_SECRET
-export OIDC_DATA_DIR="$PERSIST/oidc"
-export SSO_USERNAME
+OIDC_DATA_DIR="$LEMMY_RUNTIME_DIR/oidc"
+OIDC_PROVIDER_ID_FILE="$LEMMY_RUNTIME_DIR/oauth-provider-id"
 mkdir -p "$OIDC_DATA_DIR"
 chown -R lemmy:lemmy "$OIDC_DATA_DIR"
+
+# Reconciliation is a readiness requirement: do not expose nginx until
+# the provider, registration mode, and current runtime secret are valid.
+echo "[start.sh] Reconciling Lemmy SSO configuration"
+if ! (
+    BOOTSTRAP_MODE=reconcile \
+    LEMMY_HOSTNAME="$APP_HOST" \
+    LEMMY_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+    LEMMY_ADMIN_USERNAME="$PROVISION_ADMIN_USERNAME" \
+    OIDC_CLIENT_ID="$OIDC_CLIENT_ID" \
+    OIDC_CLIENT_SECRET="$OIDC_CLIENT_SECRET" \
+    OIDC_PUBLIC_BASE="$OIDC_PUBLIC_BASE" \
+    OIDC_LOOPBACK_BASE="$OIDC_LOOPBACK_BASE" \
+    OIDC_PROVIDER_ID_FILE="$OIDC_PROVIDER_ID_FILE" \
+    SSO_USERNAME="$SSO_USERNAME" \
+    python3 /opt/openhost-lemmy/bootstrap.py 2>&1 \
+    | sed 's/^/[bootstrap] /'
+); then
+    echo "[start.sh] SSO reconciliation failed"
+    exit 1
+fi
+LEMMY_OAUTH_PROVIDER_ID="$(cat "$OIDC_PROVIDER_ID_FILE")"
+if [[ ! "$LEMMY_OAUTH_PROVIDER_ID" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[start.sh] SSO reconciliation returned an invalid provider id"
+    exit 1
+fi
+
+# -----------------------------------------------------------------
+# Start OIDC bridge + SSO bouncer
+# -----------------------------------------------------------------
 
 echo "[start.sh] Starting OIDC bridge on 127.0.0.1:7000"
 cd /opt/openhost-lemmy
 # python3-uvicorn (Debian's apt package) ships the library but
 # not a /usr/bin/uvicorn script — invoke via `python3 -m uvicorn`.
+OIDC_PUBLIC_BASE="$OIDC_PUBLIC_BASE" \
+OIDC_CLIENT_ID="$OIDC_CLIENT_ID" \
+OIDC_CLIENT_SECRET="$OIDC_CLIENT_SECRET" \
+OIDC_DATA_DIR="$OIDC_DATA_DIR" \
+OPENHOST_ZONE_DOMAIN="$ZONE_DOMAIN" \
 gosu lemmy python3 -m uvicorn --host 127.0.0.1 --port 7000 --log-level warning --app-dir /opt/openhost-lemmy oidc_bridge:app &
 BRIDGE_PID=$!
 
 echo "[start.sh] Starting SSO bouncer on 127.0.0.1:7100"
-LEMMY_OAUTH_PROVIDER_ID=1 \
+OIDC_PUBLIC_BASE="$OIDC_PUBLIC_BASE" \
+OIDC_CLIENT_ID="$OIDC_CLIENT_ID" \
+LEMMY_OAUTH_PROVIDER_ID="$LEMMY_OAUTH_PROVIDER_ID" \
 SSO_USERNAME="$SSO_USERNAME" \
 gosu lemmy python3 -m uvicorn --host 127.0.0.1 --port 7100 --log-level warning --app-dir /opt/openhost-lemmy sso_bounce:app &
 BOUNCE_PID=$!
@@ -362,45 +395,36 @@ nginx -g 'daemon off;' &
 NGINX_PID=$!
 
 # -----------------------------------------------------------------
-# Bootstrap: register the OIDC provider with Lemmy
+# Optional watcher: promote the lazily created owner account
 # -----------------------------------------------------------------
 
-# Run in the background so it doesn't block container startup.  If
-# the provider is already registered with the right endpoints
-# (subsequent boots), it's a fast no-op.  bootstrap.py also takes
-# care of:
-#   * keeping the registration_mode set to ``open`` (so the OIDC
-#     user-creation path doesn't trip on the application-question gate)
-#   * promoting the SSO_USERNAME user to admin once it exists (it's
-#     created lazily on the first SSO sign-in, so this is a no-op
-#     until then).
+# Mandatory setup completed before nginx started. This bounded watcher
+# handles only the first-login admin promotion and is terminated during
+# shutdown; its normal completion does not restart the app.
 (
+    BOOTSTRAP_MODE=watch \
     LEMMY_HOSTNAME="$APP_HOST" \
     LEMMY_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
     LEMMY_ADMIN_USERNAME="$PROVISION_ADMIN_USERNAME" \
-    LEMMY_DATABASE_URL="postgres://lemmy:$PG_PASSWORD@localhost:5432/lemmy" \
     OIDC_CLIENT_ID="$OIDC_CLIENT_ID" \
     OIDC_CLIENT_SECRET="$OIDC_CLIENT_SECRET" \
     OIDC_PUBLIC_BASE="$OIDC_PUBLIC_BASE" \
     OIDC_LOOPBACK_BASE="$OIDC_LOOPBACK_BASE" \
+    OIDC_PROVIDER_ID_FILE="$OIDC_PROVIDER_ID_FILE" \
     SSO_USERNAME="$SSO_USERNAME" \
     python3 /opt/openhost-lemmy/bootstrap.py 2>&1 \
     | sed 's/^/[bootstrap] /'
 ) &
+BOOTSTRAP_PID=$!
 
 # -----------------------------------------------------------------
 # Supervision
 # -----------------------------------------------------------------
 
-trap 'kill -TERM "$NGINX_PID" "$LEMMY_PID" "$UI_PID" "$BRIDGE_PID" "$BOUNCE_PID" 2>/dev/null; gosu postgres "'"$PG_BIN"'/pg_ctl" -D "'"$PG_DATA"'" stop -m fast 2>/dev/null; wait' TERM INT
-
 set +e
-wait -n "$NGINX_PID" "$LEMMY_PID" "$UI_PID" "$BRIDGE_PID" "$BOUNCE_PID"
+wait -n "$PG_PID" "$NGINX_PID" "$LEMMY_PID" "$UI_PID" "$BRIDGE_PID" "$BOUNCE_PID"
 EXIT_CODE=$?
 set -e
 
 echo "[start.sh] Child exited (code=$EXIT_CODE); shutting down"
-kill -TERM "$NGINX_PID" "$LEMMY_PID" "$UI_PID" "$BRIDGE_PID" "$BOUNCE_PID" 2>/dev/null || true
-gosu postgres "$PG_BIN/pg_ctl" -D "$PG_DATA" stop -m fast 2>/dev/null || true
-wait || true
 exit "$EXIT_CODE"

@@ -1,0 +1,11 @@
+bottled-lemmy packages and adapts Lemmy and lemmy-ui for Cloud in a Bottle.
+
+Lemmy and lemmy-ui are Copyright their respective contributors and are
+licensed under the GNU Affero General Public License v3.0 or later:
+
+https://github.com/LemmyNet/lemmy
+https://github.com/LemmyNet/lemmy-ui
+
+The container also includes unmodified components distributed under their
+respective licenses, including PostgreSQL, nginx, Node.js, Debian, Starlette,
+Uvicorn, PyJWT, cryptography, bcrypt, gosu, and tini.

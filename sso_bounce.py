@@ -30,10 +30,12 @@ Run as: ``uvicorn sso_bounce:app --host 127.0.0.1 --port 7100``
 
 from __future__ import annotations
 
-import html
+import json
 import logging
 import os
+import secrets
 import uuid
+from urllib.parse import urlencode, urlsplit
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -44,12 +46,7 @@ logger = logging.getLogger("openhost-lemmy.bounce")
 
 PUBLIC_BASE = os.environ["OIDC_PUBLIC_BASE"].rstrip("/")
 CLIENT_ID = os.environ["OIDC_CLIENT_ID"]
-# Lemmy assigns oauth_provider_id automatically; the bootstrap
-# script registers exactly one provider so id == 1 unless you
-# delete and recreate it.  We pin to 1 here; if you rebuild the
-# instance with multiple providers you'd need to change this or
-# generalise the bouncer.
-LEMMY_OAUTH_PROVIDER_ID = int(os.environ.get("LEMMY_OAUTH_PROVIDER_ID", "1"))
+LEMMY_OAUTH_PROVIDER_ID = int(os.environ["LEMMY_OAUTH_PROVIDER_ID"])
 # Username the synthetic SSO user takes on first sign-in.  Must
 # match what bootstrap.py promotes to admin (its SSO_USERNAME env
 # var); we coordinate via the same env var name so an operator who
@@ -86,6 +83,26 @@ def _redirect_uri(request: Request) -> str:
     return f"https://{host}/oauth/callback"
 
 
+def _safe_prev(value: str) -> str:
+    """Return a same-origin absolute path suitable for post-login navigation."""
+    parsed = urlsplit(value)
+    if (
+        not value.startswith("/")
+        or value.startswith("//")
+        or "\\" in value
+        or parsed.scheme
+        or parsed.netloc
+        or any(ord(char) < 0x20 for char in value)
+    ):
+        return "/"
+    return value
+
+
+def _script_json(value: object) -> str:
+    """Serialize into an inline script without allowing an HTML tag breakout."""
+    return json.dumps(value, separators=(",", ":")).replace("<", "\\u003c")
+
+
 async def bounce(request: Request) -> Response:
     if not _is_owner(request):
         # Not the owner: punt to the zone /login.  Whatever they
@@ -98,27 +115,27 @@ async def bounce(request: Request) -> Response:
     state = str(uuid.uuid4())
     expires_at = "Date.now() + 5 * 60 * 1000"  # JS expression
     redirect_uri = _redirect_uri(request)
-    prev = request.query_params.get("prev", "/")
-    # Constrain prev to a same-origin path so we can't be tricked
-    # into open-redirecting.
-    if not prev.startswith("/"):
-        prev = "/"
-
-    authorize_url = (
-        f"{PUBLIC_BASE}/_oidc/authorize"
-        f"?client_id={CLIENT_ID}"
-        f"&response_type=code"
-        f"&scope=openid+email+profile"
-        f"&redirect_uri={html.escape(redirect_uri, quote=True)}"
-        f"&state={state}"
-    )
+    prev = _safe_prev(request.query_params.get("prev", "/"))
+    authorize_url = f"{PUBLIC_BASE}/_oidc/authorize?{
+        urlencode(
+            {
+                'client_id': CLIENT_ID,
+                'response_type': 'code',
+                'scope': 'openid email profile',
+                'redirect_uri': redirect_uri,
+                'state': state,
+            }
+        )
+    }"
+    nonce = secrets.token_urlsafe(18)
 
     page = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <title>Signing in to Lemmy via OpenHost SSO…</title>
-  <style>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-{nonce}'; script-src 'nonce-{nonce}'; base-uri 'none'; form-action 'none'">
+  <style nonce="{nonce}">
     body {{ font-family: -apple-system, system-ui, sans-serif;
             display:flex; min-height:100vh; align-items:center;
             justify-content:center; background:#1a1a1a; color:#ddd;
@@ -143,7 +160,7 @@ async def bounce(request: Request) -> Response:
     <p><small>If you aren't redirected,
        <a id="manual" href="">click here</a>.</small></p>
   </div>
-  <script>
+  <script nonce="{nonce}">
   (function() {{
     // Pre-fill the localStorage shape that lemmy-ui's OAuthCallback
     // component reads on the redirect-back leg.  ``username`` is
@@ -156,11 +173,11 @@ async def bounce(request: Request) -> Response:
     // require_application, this would need to carry an actual
     // free-form answer.
     var oauthState = {{
-      state: {state!r},
+      state: {_script_json(state)},
       oauth_provider_id: {LEMMY_OAUTH_PROVIDER_ID},
-      redirect_uri: {redirect_uri!r},
-      prev: {prev!r},
-      username: {SSO_USERNAME!r},
+      redirect_uri: {_script_json(redirect_uri)},
+      prev: {_script_json(prev)},
+      username: {_script_json(SSO_USERNAME)},
       answer: undefined,
       show_nsfw: undefined,
       expires_at: {expires_at}
@@ -173,7 +190,7 @@ async def bounce(request: Request) -> Response:
       // the standard error page.  Better than a silent hang.
       console.error("openhost-lemmy: localStorage unavailable: " + e);
     }}
-    var u = {authorize_url!r};
+    var u = {_script_json(authorize_url)};
     document.getElementById("manual").href = u;
     window.location.replace(u);
   }})();
@@ -183,7 +200,18 @@ async def bounce(request: Request) -> Response:
 """
     # Cache-Control: no-store — bouncer must run on every visit so
     # we never serve a stale state.
-    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+    return HTMLResponse(
+        page,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": (
+                "default-src 'none'; "
+                f"style-src 'nonce-{nonce}'; script-src 'nonce-{nonce}'; "
+                "base-uri 'none'; form-action 'none'"
+            ),
+            "Referrer-Policy": "no-referrer",
+        },
+    )
 
 
 routes = [

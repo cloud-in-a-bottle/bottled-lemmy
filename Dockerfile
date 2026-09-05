@@ -1,9 +1,9 @@
 # Lemmy + lemmy-ui + Postgres + an OIDC-bridge sidecar packaged
-# as a single OpenHost-deployable container.
+# as a single Cloud in a Bottle container.
 #
 # Layout:
 #
-#   browser → OpenHost router (subdomain lemmy.<zone>; verifies
+#   browser → Cloud in a Bottle router (subdomain lemmy.<zone>; verifies
 #                              owner zone_auth, stamps
 #                              X-OpenHost-Is-Owner)
 #          → container :8080  (nginx)
@@ -20,8 +20,8 @@
 # Internal services launched by start.sh (no s6, just bash with
 # `wait -n` like the openhost-sftp/syncthing/joplin pattern):
 #
-#   * postgres (15) — Lemmy's metadata DB.  Data dir under
-#                     $OPENHOST_APP_DATA_DIR/postgres.
+#   * postgres (16) — Lemmy's metadata DB. Data dir under
+#                     $BOTTLE_APP_DATA_DIR/postgres.
 #   * lemmy_server  — the Rust API + ActivityPub backend.
 #                     Reads $LEMMY_CONFIG_LOCATION.
 #   * lemmy-ui      — Node SSR frontend (lemmy-ui/dist).
@@ -58,9 +58,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 #   * curl: readiness probes from start.sh.
 #   * tini: PID 1 zombie reaper / signal forwarder.
 #   * gosu: drop privileges to postgres / lemmy users.
-#   * Node.js: lemmy-ui is a Node SSR app.  Bundled via the
-#     lemmy-ui upstream image's /usr/local/bin/node which we copy
-#     in below — saves an apt install of nodejs.
+#   * Node.js: lemmy-ui is a Node SSR app. Node 20 is installed from
+#     NodeSource below because the upstream UI image uses Alpine/musl.
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends \
         nginx \
@@ -80,7 +79,7 @@ RUN apt-get update -qq \
  && rm -f /etc/nginx/sites-enabled/default
 
 # PostgreSQL 16 from pgdg.postgresql.org.  Debian Bookworm's apt
-# repo has only PG 15; Lemmy 1.0-alpha's migrations include
+# repo has only PG 15; Lemmy 1.0's migrations include
 # Postgres-16-only SQL (lateral subqueries with required aliases)
 # and outright fail on PG 15.
 RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
@@ -95,8 +94,8 @@ RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
 
 # Node.js 20 from NodeSource — Debian Bookworm's apt repo only has
 # Node 18, but lemmy-ui's bundled JS uses syntax/APIs that require
-# Node 20+ (we saw the upstream lemmy-ui:1.0-alpha.18 boot crash on
-# Node 18 with a parse error in dist/js/server.js).
+# Node 20+ (older builds crashed on Node 18 with a parse error in
+# dist/js/server.js).
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*

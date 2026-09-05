@@ -16,10 +16,9 @@ different.
 
 Run as: ``uvicorn oidc_bridge:app --host 127.0.0.1 --port 7000``
 
-Persistent state lives under ``$OIDC_DATA_DIR``:
-  * signing-key.pem — RSA private key for ID-token signing,
-    persists across restarts so Lemmy keeps trusting tokens after
-    a process recycle.
+The signing key lives under the container-local ``$OIDC_DATA_DIR``.
+It rotates on restart together with the OIDC client secret, after the
+provider configuration is reconciled and before nginx becomes ready.
 
 The authorization-code store is in-memory: codes are single-use
 and short-lived (5 min), so losing them on restart just makes the
@@ -36,26 +35,26 @@ zone_auth cookie and we trust it.
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
 import secrets
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, unquote_plus
+from urllib.parse import unquote_plus, urlencode
 
 import jwt
-from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import HTMLResponse
-from starlette.responses import JSONResponse
-from starlette.responses import PlainTextResponse
-from starlette.responses import RedirectResponse
-from starlette.responses import Response
+from starlette.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from starlette.routing import Route
 
 logger = logging.getLogger("openhost-lemmy.oidc")
@@ -108,7 +107,11 @@ def _public_jwk() -> dict[str, str]:
 
     def _b64(n: int) -> str:
         byte_len = (n.bit_length() + 7) // 8
-        return base64.urlsafe_b64encode(n.to_bytes(byte_len, "big")).rstrip(b"=").decode("ascii")
+        return (
+            base64.urlsafe_b64encode(n.to_bytes(byte_len, "big"))
+            .rstrip(b"=")
+            .decode("ascii")
+        )
 
     return {
         "kty": "RSA",
@@ -142,21 +145,32 @@ def _is_owner(request: Request) -> bool:
 
 
 async def discovery(_: Request) -> JSONResponse:
-    return JSONResponse({
-        "issuer": PUBLIC_BASE + "/_oidc",
-        "authorization_endpoint": PUBLIC_BASE + "/_oidc/authorize",
-        "token_endpoint": PUBLIC_BASE + "/_oidc/token",
-        "userinfo_endpoint": PUBLIC_BASE + "/_oidc/userinfo",
-        "jwks_uri": PUBLIC_BASE + "/_oidc/jwks",
-        "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
-        "subject_types_supported": ["public"],
-        "id_token_signing_alg_values_supported": ["RS256"],
-        "scopes_supported": ["openid", "email", "profile"],
-        "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
-        "claims_supported": ["sub", "email", "email_verified", "name", "preferred_username"],
-        "code_challenge_methods_supported": ["S256"],
-    })
+    return JSONResponse(
+        {
+            "issuer": PUBLIC_BASE + "/_oidc",
+            "authorization_endpoint": PUBLIC_BASE + "/_oidc/authorize",
+            "token_endpoint": PUBLIC_BASE + "/_oidc/token",
+            "userinfo_endpoint": PUBLIC_BASE + "/_oidc/userinfo",
+            "jwks_uri": PUBLIC_BASE + "/_oidc/jwks",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+            "scopes_supported": ["openid", "email", "profile"],
+            "token_endpoint_auth_methods_supported": [
+                "client_secret_post",
+                "client_secret_basic",
+            ],
+            "claims_supported": [
+                "sub",
+                "email",
+                "email_verified",
+                "name",
+                "preferred_username",
+            ],
+            "code_challenge_methods_supported": ["S256"],
+        }
+    )
 
 
 async def jwks(_: Request) -> JSONResponse:
@@ -182,8 +196,8 @@ async def authorize(request: Request) -> Response:
         raise HTTPException(400, "only response_type=code is supported")
     if client_id != CLIENT_ID:
         raise HTTPException(400, "unknown client_id")
-    if not redirect_uri:
-        raise HTTPException(400, "missing redirect_uri")
+    if redirect_uri != f"{PUBLIC_BASE}/oauth/callback":
+        raise HTTPException(400, "invalid redirect_uri")
 
     if not _is_owner(request):
         # Browser flow: bounce to the OpenHost zone's /login.
@@ -234,7 +248,10 @@ def _check_client_auth(request: Request, form: dict[str, str]) -> None:
     else:
         provided_id = form.get("client_id", "")
         provided_secret = form.get("client_secret", "")
-    if not (provided_id == CLIENT_ID and secrets.compare_digest(provided_secret, CLIENT_SECRET)):
+    if not (
+        provided_id == CLIENT_ID
+        and secrets.compare_digest(provided_secret, CLIENT_SECRET)
+    ):
         raise HTTPException(401, "invalid client credentials")
 
 
@@ -248,9 +265,14 @@ def _verify_pkce(record: dict[str, Any], code_verifier: str | None) -> None:
     method = (record.get("code_challenge_method") or "").upper() or "PLAIN"
     if method == "S256":
         import hashlib
-        expected = base64.urlsafe_b64encode(
-            hashlib.sha256(code_verifier.encode("ascii")).digest()
-        ).rstrip(b"=").decode("ascii")
+
+        expected = (
+            base64.urlsafe_b64encode(
+                hashlib.sha256(code_verifier.encode("ascii")).digest()
+            )
+            .rstrip(b"=")
+            .decode("ascii")
+        )
         if not secrets.compare_digest(expected, challenge):
             raise HTTPException(400, "code_verifier mismatch (S256)")
     elif method == "PLAIN":
@@ -317,13 +339,15 @@ async def token(request: Request) -> JSONResponse:
         algorithm="RS256",
         headers={"kid": _KEY_ID},
     )
-    return JSONResponse({
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": ACCESS_TOKEN_TTL_SECONDS,
-        "id_token": id_token,
-        "scope": record.get("scope", "openid"),
-    })
+    return JSONResponse(
+        {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": ACCESS_TOKEN_TTL_SECONDS,
+            "id_token": id_token,
+            "scope": record.get("scope", "openid"),
+        }
+    )
 
 
 def _verify_access_token(token_value: str) -> dict[str, Any]:
@@ -344,13 +368,15 @@ async def userinfo(request: Request) -> JSONResponse:
         raise HTTPException(401, "missing Bearer token")
     claims = _verify_access_token(auth_header[7:])
     email = claims.get("email", "")
-    return JSONResponse({
-        "sub": claims["sub"],
-        "email": email,
-        "email_verified": True,
-        "name": "owner",
-        "preferred_username": "owner",
-    })
+    return JSONResponse(
+        {
+            "sub": claims["sub"],
+            "email": email,
+            "email_verified": True,
+            "name": "owner",
+            "preferred_username": "owner",
+        }
+    )
 
 
 async def healthz(_: Request) -> Response:

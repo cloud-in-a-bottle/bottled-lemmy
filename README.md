@@ -1,147 +1,153 @@
 # bottled-lemmy
 
-[Lemmy](https://join-lemmy.org/) (federated link-aggregator, fediverse Reddit) packaged for Cloud in a Bottle, with an in-container OIDC bridge so the zone owner is auto-logged-in via Cloud in a Bottle SSO without ever seeing Lemmy's native login page.
+[Lemmy](https://join-lemmy.org/) is a federated link aggregator and discussion
+platform. This repository packages it as a Cloud in a Bottle app with automatic
+owner sign-in.
 
-Deploy this on your zone and you get:
+## What you get
 
-- A federated Lemmy instance at `https://lemmy.<your-zone>/`.
-- The Cloud in a Bottle zone owner is auto-signed-in as the Lemmy admin.
-- Federated subscribe / browse / post / vote with any other Lemmy or fediverse instance (Mastodon users can subscribe to communities and reply to posts).
+- A federated Lemmy instance at `https://lemmy.<zone>/`.
+- The Cloud in a Bottle owner signed in automatically as a Lemmy admin.
+- Public, read-only browsing for guests and ActivityPub peers.
+- Native local registration disabled; the owner account is created through SSO.
+- Persistent posts, communities, subscriptions, and account state.
+- Matching Lemmy backend and UI versions, currently `1.0.0-beta.1`.
+
+## Usage
+
+Open `https://lemmy.<zone>/`. The first visit briefly redirects through Cloud in
+a Bottle SSO, creates a Lemmy account matching the owner's zone username, and
+promotes it to admin. Later visits reuse the Lemmy session.
+
+To follow a remote community, search for its federated name, such as
+`!linux@lemmy.ml`, open it, and select Subscribe. New activities then arrive
+through ActivityPub federation.
+
+Guests can browse public communities, posts, comments, and profiles. Lemmy's own
+permissions prevent guests from posting or voting without an account, and nginx
+rejects native signup requests. Remote users participate from accounts on their
+own federated instances.
+
+## Deploying
+
+Deploy from the Cloud in a Bottle catalog, dashboard, or CLI:
+
+```bash
+bottle app deploy https://github.com/cloud-in-a-bottle/bottled-lemmy --wait
+```
+
+The app becomes available at `https://lemmy.<zone>/`.
+
+## Data
+
+All persistent state lives under `$BOTTLE_APP_DATA_DIR/postgres/` as a
+PostgreSQL 16 cluster. It contains Lemmy accounts, posts, comments, communities,
+subscriptions, moderation state, and the configured OAuth provider.
+
+No usable password, token, OIDC signing key, or OIDC client secret is written as
+a standalone persistent file:
+
+- PostgreSQL uses its private Unix socket and does not need a database password.
+- The internal provisioning-admin password is random, exists only for the
+  container boot, and is replaced on every restart.
+- The OIDC signing key and client secret live under `/run/lemmy`, rotate on every
+  restart, and are reconciled before the app becomes ready.
+- Legacy `admin-password.txt`, `postgres-password.txt`,
+  `oidc-client-secret.txt`, and persisted `config.hjson` files are removed on
+  startup.
+
+## Backup
+
+Do not copy a running PostgreSQL data directory file by file. Use one of these
+methods:
+
+1. Stop the Lemmy app, then back up `$BOTTLE_APP_DATA_DIR/postgres/`.
+2. While the app is running, execute `pg_dump -U lemmy -d lemmy` through the
+   PostgreSQL Unix socket and back up the resulting logical dump.
+
+Restore into the same public hostname. A Lemmy hostname is part of every
+ActivityPub actor and object identity; changing it breaks existing federation
+identities and links.
+
+## Upgrades
+
+The backend and UI image tags must always move together. Lemmy runs database
+migrations when the new backend starts, so take a database backup before changing
+versions. Test owner SSO, public browsing, and a remote subscription before
+publishing an upgrade.
+
+This package uses Lemmy 1.0 because native OAuth/OIDC support is required for
+owner SSO. `1.0.0-beta.1` is the most stable release with that feature and also
+contains the compatibility fix for `Accept` activities sent by Lemmy 0.19
+instances.
 
 ## Architecture
 
-Single container running:
+One container runs:
 
-| Service | Port | Purpose |
-|---|---|---|
-| nginx | 8080 (public) | request router |
-| lemmy_server | 8536 (loopback) | Rust ActivityPub backend |
-| lemmy-ui | 1234 (loopback) | Node SSR frontend |
-| Postgres 16 | 5432 (loopback) | Lemmy's metadata DB |
-| oidc_bridge | 7000 (loopback) | OIDC provider for SSO |
-| sso_bounce | 7100 (loopback) | OAuth start page (primes localStorage + 302 to /authorize) |
+| Service | Listen address | Purpose |
+| --- | --- | --- |
+| nginx | `0.0.0.0:8080` | Public routing and registration guard |
+| lemmy_server | `127.0.0.1:8536` | API and ActivityPub backend |
+| lemmy-ui | `127.0.0.1:1234` | Web interface and SSR |
+| PostgreSQL 16 | Unix socket and `127.0.0.1:5432` | Persistent metadata |
+| OIDC bridge | `127.0.0.1:7000` | Owner SSO provider |
+| SSO bouncer | `127.0.0.1:7100` | Starts lemmy-ui's OAuth flow |
 
-Supervision: bash + `wait -n` (same pattern as `bottled-sftp` / `bottled-syncthing` / `bottled-joplin`). Postgres bin from Debian Bookworm's apt repo; lemmy_server and lemmy-ui binaries copied from the official `dessalines/lemmy` and `dessalines/lemmy-ui` upstream images via Docker multi-stage build.
+`start.sh` starts PostgreSQL and Lemmy, waits for migrations, reconciles the OIDC
+provider, and only then exposes nginx. PostgreSQL and all serving processes are
+supervised; an unexpected exit stops the container so Cloud in a Bottle can
+restart it.
 
-## How auth works
+The OIDC provider uses a public authorization endpoint and loopback token and
+userinfo endpoints. The browser reaches
+`https://lemmy.<zone>/_oidc/authorize`, while Lemmy exchanges the code at
+`http://127.0.0.1:7000`. This avoids cloud-provider NAT hairpinning.
 
-Two Lemmy users share this single-tenant deployment:
+The manifest makes `/` public because ActivityPub inboxes, WebFinger, NodeInfo,
+and public Lemmy pages must be internet-reachable. The Cloud in a Bottle router
+still authenticates owner requests and stamps `X-OpenHost-Is-Owner: true`; only
+that trusted header can start the owner OIDC flow.
 
-- **`openhost-provisioner`** — the bootstrap admin created by Lemmy's setup flow.  Its web-login password is minted fresh in-memory on every container boot and re-stamped into Lemmy's `local_user.password_encrypted` (bcrypt) by `bootstrap.py` — it is **never written to disk**, so the file-browser app can't read it.  Normally untouched; it owns the OAuth-provider registration + the registration-mode toggle the SSO flow depends on.  It has a deliberately reserved internal name so it never collides with the owner's real username.  Because the password lives only in the boot's `start.sh` process memory (not exported into the container's environment), there's no stored value to recover — day-to-day access is always via SSO.  To log in as this admin directly, set a known password yourself:  `podman exec -it bottled-lemmy /usr/lib/postgresql/16/bin/psql "$LEMMY_DATABASE_URL"` then `UPDATE local_user SET password_encrypted = crypt('yourpw', gen_salt('bf', 12)) WHERE person_id = (SELECT id FROM person WHERE name = 'openhost-provisioner');` (requires the `pgcrypto` extension), or just keep using SSO.  (Deploys created before this change used `owner` as the provisioning admin; `bootstrap.py` still recognises that legacy name on upgrade.)
-- **The SSO user** — the account the zone owner ends up signed in as for normal day-to-day use.  Created lazily the first time the owner signs in via SSO, then promoted to admin by `bootstrap.py`.  It takes the **owner's own Cloud in a Bottle username** (`OPENHOST_OWNER_USERNAME`, the name they chose at Cloud in a Bottle `/setup`), so their Lemmy identity matches their Cloud in a Bottle identity.  If that env var is unset it falls back to `openhost` (and, in the unlikely event the owner picked the reserved `openhost-provisioner` name, it also falls back to `openhost`).
+## Resources
 
-The two are separate because Lemmy's OAuth flow refuses to claim a pre-existing local user as an OIDC identity — so the SSO has to mint its own user distinct from the provisioning admin.  The bouncer pre-fills the SSO `username` from `SSO_USERNAME` (the owner's username) so the created account carries the right name.
+The manifest requests 2 GiB RAM and 1.5 CPU cores for both build and runtime.
+This is appropriate for a personal or small-community instance. Larger instances
+need resource limits based on their database size and federation traffic.
 
-The end-to-end flow:
+## Troubleshooting
 
-1. **Cloud in a Bottle router** stamps `X-OpenHost-Is-Owner: true` on every owner request after JWT-verifying the `zone_auth` cookie.
-2. **nginx** detects the combination `X-OpenHost-Is-Owner: true` + no Lemmy `jwt` cookie + `Accept: text/html` and rewrites the request to `/sso-bounce?prev=<original-path>`.
-3. **`sso_bounce.py`** serves a tiny HTML page with inline JS that mimics what lemmy-ui's `Sign in with OpenHost` button would do: writes `oauth_state` to `localStorage` (state, oauth_provider_id, redirect_uri, prev, expires_at, **username=`SSO_USERNAME`** — the owner's Cloud in a Bottle username) and `window.location.assign(...)` to the OIDC `/authorize` URL.
-4. **`oidc_bridge.py`** sees `X-OpenHost-Is-Owner: true` on `/authorize`, generates an authorization code, redirects back to `https://lemmy.<zone>/oauth/callback?code=...&state=...`.
-5. **lemmy-ui's `OAuthCallback` component** reads `localStorage.oauth_state`, verifies the state matches, calls `POST /api/v4/oauth/authenticate` with the code + redirect_uri + username.
-6. **Lemmy backend** exchanges the code with the OIDC bridge **via loopback** (see "Loopback OIDC plumbing" below for why), verifies the JWKS signature, reads `sub` + `email` claims, creates the local SSO user (first time, named after `SSO_USERNAME` = the owner's username) or signs them in.  Returns a JWT that lemmy-ui stores in localStorage AND the `jwt` cookie.
-7. **`bootstrap.py`'s admin-watcher** (running in the background since container start) sees the SSO user appear and promotes them to admin via `POST /api/v4/admin/add`.  This makes the SSO sign-in the *admin* user; `bootstrap.py` exits once the promotion succeeds.
-8. **Subsequent owner requests** carry the Lemmy `jwt` cookie, so nginx's bouncer condition fails and traffic flows directly to lemmy-ui — no further bouncing.
+Check status and logs with:
 
-Federation traffic (anonymous ActivityPub requests from remote instances) never carries `X-OpenHost-Is-Owner` so the bouncer never fires; nginx forwards them straight to Lemmy.
-
-### Loopback OIDC plumbing
-
-The OAuth provider is registered with a deliberate split of public and loopback endpoints:
-
-| Endpoint | URL | Why |
-|---|---|---|
-| `authorization_endpoint` | `https://lemmy.<zone>/_oidc/authorize` | The browser navigates here directly; must be public. |
-| `token_endpoint` | `http://127.0.0.1:7000/_oidc/token` | Lemmy backend calls this server-to-server. |
-| `userinfo_endpoint` | `http://127.0.0.1:7000/_oidc/userinfo` | Lemmy backend calls this server-to-server. |
-| `issuer` | `https://lemmy.<zone>/_oidc` | Validated against the `iss` claim that the bridge mints; public form keeps issued tokens externally-verifiable. |
-
-The reason `token_endpoint` and `userinfo_endpoint` use loopback (rather than the public URL): on most cloud providers the host can't connect to its own public IP — NAT-loopback / hairpinning is disabled by default.  Routing the server-to-server hops via `127.0.0.1` sidesteps the entire NAT layer.  The OIDC bridge runs in the same container so loopback is always reachable.
-
-`bootstrap.py` reconciles this configuration on every container start: existing deployments that were registered with public-URL endpoints get upgraded in place with no operator intervention.
-
-### Registration mode
-
-Lemmy's OAuth user-creation path goes through the same code as a self-registration via the `/signup` form, including the `registration_mode = require_application` gate.  On a single-tenant bottled-lemmy that gate has nowhere to obtain an application-question answer from (the bouncer's `oauth_state` carries `answer: undefined`), so it would reject the SSO sign-in with `registration_application_answer_required`.
-
-`bootstrap.py` fixes this by setting `registration_mode = open` once on first boot.  Federated remote users on other instances are unaffected by this setting; only signups *to this instance* are influenced, and on a single-tenant deploy the only real signup path is the SSO bounce.
-
-## Quick start
-
-1. Deploy the app from the Cloud in a Bottle dashboard.
-2. Open `https://lemmy.<your-zone>/`. You'll see a brief "Signing in to Lemmy via Cloud in a Bottle SSO…" splash, then land directly on Lemmy's home feed signed in under your own Cloud in a Bottle username.  The first sign-in creates that user as a non-admin; `bootstrap.py`'s background watcher promotes them to admin within ~30 seconds (refresh the page to pick up the promoted role).
-3. Click `Communities` to browse local + federated communities. Use `Communities → Subscribe` to follow any remote Lemmy / fediverse community by URL (`!asklemmy@lemmy.world`, etc.).
-
-## Configuration
-
-| Env var | Purpose | Default |
-|---|---|---|
-| `OPENHOST_APP_DATA_DIR` | Persistent data dir; injected by compute_space. | `/data/app_data/lemmy` |
-| `OPENHOST_ZONE_DOMAIN` | Zone domain; injected. Used for `hostname` in `config.hjson` and OIDC `iss`. | `localhost` |
-| `LEMMY_CONFIG_LOCATION` | Lemmy backend config path. | `$OPENHOST_APP_DATA_DIR/config.hjson` |
-
-### Persistent files (under `$OPENHOST_APP_DATA_DIR/`)
-
-```
-postgres/                 — Postgres 16 data dir
-postgres-password.txt     — auto-generated DB role password (mode 0600)
-oidc-client-secret.txt    — auto-generated OIDC client secret (mode 0600)
-oidc/signing-key.pem      — OIDC bridge's RSA private key (persists so
-                            already-issued ID tokens stay verifiable)
+```bash
+bottle app status lemmy
+bottle app logs lemmy
 ```
 
-Two things deliberately do **not** live under `$OPENHOST_APP_DATA_DIR`:
+Useful checks:
 
-- **The Lemmy admin (web-login) password.** It's minted in-memory each
-  boot and re-stamped into the DB by `bootstrap.py`; nothing usable lands
-  on disk.  Earlier builds persisted it as `admin-password.txt` — that was
-  a credential leak (file-browser's `access_all_data` mount could read a
-  live `/login` password).  `start.sh` scrubs any legacy copy on boot.
-- **The rendered `config.hjson`** (which embeds the DB + admin passwords in
-  cleartext).  It's written to a container-local `/run/lemmy/config.hjson`
-  (not a bind mount) and re-rendered every boot, so it never appears under
-  `app_data` either.  `start.sh` scrubs any legacy `$PERSIST/config.hjson`.
+```bash
+curl -fsS https://lemmy.<zone>/api/v3/site
+curl -fsS https://lemmy.<zone>/.well-known/nodeinfo
+curl -H 'Accept: application/activity+json' https://lemmy.<zone>/u/<username>
+```
 
-`postgres-password.txt` and `oidc-client-secret.txt` remain on disk: neither
-is a user password.  Postgres binds loopback-only, so the DB password is only
-useful to something already inside the container (same trust boundary as
-file-browser reading it), and the OIDC client secret only lets a party that
-already controls this container mint tokens for this one app.
+If a remote subscription remains pending, confirm the remote instance can reach
+`/inbox` and that both instances have accurate clocks. After an upgrade that
+fixes federation compatibility, unsubscribe and subscribe again to generate a
+fresh Follow activity.
 
-To rotate the DB password, `rm postgres-password.txt` and restart — start.sh
-regenerates it and `ALTER ROLE`s the new one. The admin password rotates on
-its own every boot.
+## Caveats
 
-## Federation
+- **No pict-rs:** image uploads, avatars, thumbnails, and proxied remote images
+  are unavailable. Text posts, links, comments, votes, and federation work.
+- **Single owner:** Cloud in a Bottle SSO maps to one local Lemmy admin. Other
+  people participate through accounts on federated instances.
+- **No outbound email:** confirmation and password-reset email are unavailable.
+- **Bundled PostgreSQL:** the database runs in the same container rather than as
+  an external managed service.
 
-Lemmy federates over ActivityPub. Other instances need to reach:
+## License
 
-- `/.well-known/webfinger` — discovery
-- `/.well-known/nodeinfo`, `/nodeinfo/2.0` — instance metadata
-- `/inbox`, `/u/<user>/inbox`, `/c/<community>/inbox` — federated activities
-- `/u/<user>`, `/c/<community>`, `/post/<id>`, `/comment/<id>` — actor + object profiles
-- `/api/v3/*` (read-only endpoints) — federation peers occasionally fetch
-
-The manifest's `routing.public_paths` is set to `"/"` (the whole app), so the Cloud in a Bottle router never 302s an anonymous visitor to `/login` — whether they're a federation peer hitting the Inbox or a human browsing the web UI.
-
-## Anonymous viewing
-
-Lemmy is a public link-aggregator, so anonymous (non-owner) visitors can browse the whole instance read-only: the web UI, communities, user profiles, posts, and comments. This works because `routing.public_paths = ["/"]` tells the Cloud in a Bottle router to let unauthenticated traffic through.
-
-This does not weaken SSO. The Cloud in a Bottle router still verifies the owner's `zone_auth` cookie on **every** request (public paths only suppress the login-redirect on auth *failure*; they never skip the owner-auth attempt), so it still stamps `X-OpenHost-Is-Owner: true` when the owner is signed in. nginx's SSO bounce keys off that header, so the owner is still auto-logged-in while anonymous visitors get the read-only view. Lemmy's own permission model still governs who can post/vote/moderate.
-
-## Limitations
-
-- **No pict-rs.** Image hosting (avatars, post thumbnails, federated remote media) is not bundled. Lemmy works without it (image features just become no-ops); add a `[[ports]]`-published pict-rs alongside if you want it.
-- **Single owner.** This deployment is single-tenant by design. The OIDC bridge always claims the same `sub`, so every SSO sign-in lands as the same Lemmy user (named after the owner's Cloud in a Bottle username). Federated remote users (signing up from other instances and following your communities) are handled normally; this only constrains who-can-be-an-admin-on-this-instance.
-- **No outbound email.** Account confirmations and password-reset are disabled. This is fine for the single-tenant owner because normal access is via Cloud in a Bottle SSO (no password needed); the break-glass provisioning-admin password is minted in-memory each boot rather than stored, so there's nothing to "reset".
-- **PKCE supported** on the OIDC flow (per Lemmy 0.19.10+'s requirement) but the `state` validation is left to lemmy-ui's localStorage check. If lemmy-ui's `oauth_state` schema changes, the bouncer's inline JS would need updating to match.
-- **Bundled Postgres**, not an external one. Postgres 16 (from the pgdg apt repo — Lemmy 1.0-alpha's migrations use Postgres-16-only SQL) runs in the same container; data lives under `$OPENHOST_APP_DATA_DIR/postgres/`. Backups via Cloud in a Bottle's `openhost-backup` app capture this directory verbatim.
-
-## How this is built
-
-- **Base**: `debian:bookworm-slim`. Matches the upstream `dessalines/lemmy` build environment so libpq and glibc agree.
-- **lemmy_server binary**: copied from `dessalines/lemmy:1.0.0-beta.1` via `COPY --from=...` (OAuth/OIDC — required for SSO — landed only in the 1.0 series; 0.19.x has no `oauth_provider` API).
-- **lemmy-ui**: copied from `dessalines/lemmy-ui:1.0.0-beta.1` (JS bundle only; Node itself comes from NodeSource apt because the upstream image is musl/Alpine).
-- **Postgres**: `postgresql-16` from the pgdg apt repo.
-- **Python services** (oidc_bridge, sso_bounce, bootstrap): `starlette` + `python3-jwt` + `python3-cryptography` + `uvicorn`, all from apt — no `pip install` step in the build.
+Lemmy, lemmy-ui, and this packaging repository are licensed under the GNU Affero
+General Public License v3.0 or later. See `LICENSE` and `NOTICE`.

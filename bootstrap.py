@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """First-boot OIDC-provider registration + SSO-readiness for openhost-lemmy.
 
-Runs on every container start; idempotent.  Tasks (in order):
+Runs on every container start; idempotent. In ``reconcile`` mode it:
 
   1. Wait for Lemmy to come up.
   2. Re-stamp the provisioning admin (``owner``) password in the DB to
@@ -18,16 +18,14 @@ Runs on every container start; idempotent.  Tasks (in order):
   4. Set ``local_site.registration_mode = open`` so the OIDC
      user-creation path can mint the synthetic ``openhost`` SSO user
      without bouncing off the new-account application gate.
-  5. Watch for the ``openhost`` user appearing (lazily created on
-     the first SSO sign-in) and promote them to admin.  Loops with
-     a short sleep between probes; exits cleanly once the user is
-     promoted or after the watch window expires.  Subsequent
-     container restarts re-enter the loop and short-circuit on
-     finding an already-promoted user, so this is idempotent across
-     reboots and the operator can sign in for the first time at
-     any point — the next bootstrap iteration will catch up.
+  5. Promote the owner SSO user if it already exists.
+
+In ``watch`` mode it only waits for a lazily created owner SSO user
+and promotes it. The supervisor starts this bounded mode after the
+mandatory reconciliation has completed.
 
 Configuration via env:
+  * BOOTSTRAP_MODE        — "reconcile" (default) or "watch"
   * LEMMY_API_URL         — http://127.0.0.1:8536/api/v4
   * LEMMY_HOSTNAME        — public hostname (e.g. lemmy.<zone>)
   * LEMMY_ADMIN_USERNAME  — provisioning admin username created by the
@@ -38,6 +36,7 @@ Configuration via env:
   * LEMMY_ADMIN_PASSWORD  — provisioning admin password (ephemeral,
                             minted in-memory by start.sh each boot)
   * OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_PUBLIC_BASE
+  * OIDC_PROVIDER_ID_FILE — runtime file used to configure the bouncer
   * OIDC_LOOPBACK_BASE    — internal URL the Lemmy backend uses for
                             server-to-server OIDC calls.  Defaults to
                             http://127.0.0.1:7000 (matches start.sh).
@@ -71,17 +70,13 @@ LEMMY_HOSTNAME = os.environ["LEMMY_HOSTNAME"]
 ADMIN_USERNAME = os.environ.get("LEMMY_ADMIN_USERNAME", "openhost-provisioner")
 LEGACY_ADMIN_USERNAMES = ["owner"]
 ADMIN_PASSWORD = os.environ["LEMMY_ADMIN_PASSWORD"]
-# Connection string for the bundled Postgres.  Used only to re-stamp
-# the owner admin's bcrypt password each boot (see
-# _reset_admin_password_in_db).  Optional: if unset we skip the
-# reset and assume the config.hjson setup block already created the
-# owner with ADMIN_PASSWORD (true on first boot).
-DATABASE_URL = os.environ.get("LEMMY_DATABASE_URL", "")
+BOOTSTRAP_MODE = os.environ.get("BOOTSTRAP_MODE", "reconcile")
 # Lemmy hashes local-user passwords with bcrypt cost 12 (the
 # "$2b$12$" prefix).  We must match that cost so the hash we write
 # verifies against Lemmy's password checker.
 BCRYPT_COST = 12
 PSQL_BIN = os.environ.get("PSQL_BIN", "/usr/lib/postgresql/16/bin/psql")
+GOSU_BIN = os.environ.get("GOSU_BIN", "/usr/sbin/gosu")
 OIDC_CLIENT_ID = os.environ["OIDC_CLIENT_ID"]
 OIDC_CLIENT_SECRET = os.environ["OIDC_CLIENT_SECRET"]
 OIDC_PUBLIC_BASE = os.environ["OIDC_PUBLIC_BASE"].rstrip("/")
@@ -89,6 +84,9 @@ OIDC_LOOPBACK_BASE = os.environ.get(
     "OIDC_LOOPBACK_BASE", "http://127.0.0.1:7000"
 ).rstrip("/")
 SSO_USERNAME = os.environ.get("SSO_USERNAME", "openhost")
+OIDC_PROVIDER_ID_FILE = os.environ.get(
+    "OIDC_PROVIDER_ID_FILE", "/run/lemmy/oauth-provider-id"
+)
 
 PROVIDER_DISPLAY = "OpenHost"
 
@@ -141,34 +139,50 @@ def _psql_reset_password(username: str, hashed: str) -> bool | None:
     caller can distinguish "user absent" from "couldn't tell").
     Uses ``RETURNING`` so we can count affected rows precisely.
     """
+
+    def sql_literal(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
     sql = (
-        "UPDATE local_user SET password_encrypted = :'hash' "
+        f"UPDATE local_user SET password_encrypted = {sql_literal(hashed)} "
         "WHERE person_id = (SELECT id FROM person "
-        "WHERE name = :'uname' AND local = true) "
+        f"WHERE name = {sql_literal(username)} AND local = true) "
         "RETURNING id;"
     )
     cmd = [
+        GOSU_BIN,
+        "postgres",
         PSQL_BIN,
-        DATABASE_URL,
-        "-v", "ON_ERROR_STOP=1",
-        "-v", f"hash={hashed}",
-        "-v", f"uname={username}",
+        "-d",
+        "lemmy",
+        "-v",
+        "ON_ERROR_STOP=1",
         "-tA",
     ]
     try:
         result = subprocess.run(
-            cmd, input=sql, capture_output=True, text=True, timeout=30, check=False,
+            cmd,
+            input=sql,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except OSError:
         print(
-            f"[bootstrap] WARN: admin password reset psql invocation failed: {exc}",
+            "[bootstrap] WARN: admin password reset psql invocation failed",
+            file=sys.stderr,
+        )
+        return None
+    except subprocess.TimeoutExpired:
+        print(
+            "[bootstrap] WARN: admin password reset timed out after 30 seconds",
             file=sys.stderr,
         )
         return None
     if result.returncode != 0:
         print(
-            f"[bootstrap] WARN: admin password reset returned "
-            f"rc={result.returncode} stderr={result.stderr.strip()!r}",
+            f"[bootstrap] WARN: admin password reset returned rc={result.returncode}",
             file=sys.stderr,
         )
         return None
@@ -208,9 +222,6 @@ def _reset_admin_password_in_db() -> str | None:
     matching row — e.g. a brand-new first boot where the config setup
     block will create the admin with the config password anyway).
     """
-    if not DATABASE_URL:
-        print("[bootstrap] no LEMMY_DATABASE_URL; skipping admin password reset")
-        return None
     try:
         import bcrypt
     except ImportError:
@@ -320,7 +331,7 @@ def _provider_payload() -> dict:
     }
 
 
-def _reconcile_provider(jwt_token: str, providers: list[dict]) -> None:
+def _reconcile_provider(jwt_token: str, providers: list[dict]) -> int:
     """Create or update the OpenHost OAuth provider so the stored
     endpoints match the current ``OIDC_*`` env config.
 
@@ -343,21 +354,17 @@ def _reconcile_provider(jwt_token: str, providers: list[dict]) -> None:
         status, payload = _request("POST", "/oauth_provider", desired, auth=jwt_token)
         if status >= 400:
             print(
-                f"[bootstrap] FATAL: oauth_provider create returned "
-                f"status={status} payload={payload!r}",
+                f"[bootstrap] FATAL: oauth_provider create returned status={status}",
                 file=sys.stderr,
             )
             raise SystemExit(1)
-        print(f"[bootstrap] OAuth provider registered (id={payload.get('id')})")
-        return
+        provider_id = int(payload["id"])
+        print(f"[bootstrap] OAuth provider registered (id={provider_id})")
+        return provider_id
 
-    # Compare the stored endpoints against what we'd configure
-    # today.  If anything material drifted (the public hostname
-    # changed, we redesigned the loopback split, etc.), patch in
-    # place.  We deliberately do NOT compare client_secret here —
-    # PUTting a new secret would orphan any existing OIDC sessions,
-    # and the operator can rotate the secret out-of-band by
-    # deleting the persisted file and restarting the container.
+    # Compare the stored endpoints against what we'd configure today.
+    # The runtime client secret rotates every boot and is always PUT;
+    # changing it does not alter the provider id or linked account.
     drift_keys = (
         "issuer",
         "authorization_endpoint",
@@ -376,25 +383,17 @@ def _reconcile_provider(jwt_token: str, providers: list[dict]) -> None:
     # ``auto_approve_application``) are accepted but NOT returned in
     # ``admin_oauth_providers`` on this Lemmy version, so a naive
     # ``existing.get(k) != desired.get(k)`` would see them as
-    # perpetually "drifted" (None != True) and re-PUT on every boot.
-    # Treating a field that's absent from the response as "can't
-    # tell → assume in sync" stops that harmless-but-noisy churn
-    # while still catching genuine drift on the fields Lemmy does
-    # report (endpoints, issuer, scopes, enabled, …).
+    # perpetually "drifted" (None != True). Treat an absent field as
+    # unknown while still reporting genuine endpoint/config drift.
     drifted = [
-        k for k in drift_keys
-        if k in existing and existing.get(k) != desired.get(k)
+        k for k in drift_keys if k in existing and existing.get(k) != desired.get(k)
     ]
-    if not drifted:
-        print(
-            f"[bootstrap] OAuth provider {PROVIDER_DISPLAY!r} already up "
-            f"to date (id={existing.get('id')})"
-        )
-        return
-
+    reason = (
+        f"drifted fields: {drifted}" if drifted else "refreshing runtime client secret"
+    )
     print(
         f"[bootstrap] reconciling OAuth provider {PROVIDER_DISPLAY!r} "
-        f"(id={existing.get('id')}) — drifted fields: {drifted}"
+        f"(id={existing.get('id')}) — {reason}"
     )
     update_body: dict = {"id": existing["id"], **desired}
     # ``client_id`` and ``display_name`` cannot be updated through
@@ -405,12 +404,22 @@ def _reconcile_provider(jwt_token: str, providers: list[dict]) -> None:
     status, payload = _request("PUT", "/oauth_provider", update_body, auth=jwt_token)
     if status >= 400:
         print(
-            f"[bootstrap] FATAL: oauth_provider update returned "
-            f"status={status} payload={payload!r}",
+            f"[bootstrap] FATAL: oauth_provider update returned status={status}",
             file=sys.stderr,
         )
         raise SystemExit(1)
     print(f"[bootstrap] OAuth provider reconciled (id={existing.get('id')})")
+    return int(existing["id"])
+
+
+def _write_provider_id(provider_id: int) -> None:
+    path = os.path.abspath(OIDC_PROVIDER_ID_FILE)
+    os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+    temp_path = path + ".tmp"
+    with open(temp_path, "w", encoding="ascii") as output:
+        output.write(f"{provider_id}\n")
+    os.chmod(temp_path, 0o644)
+    os.replace(temp_path, path)
 
 
 def _ensure_open_registration(jwt_token: str, local_site: dict) -> None:
@@ -421,10 +430,10 @@ def _ensure_open_registration(jwt_token: str, local_site: dict) -> None:
     seen.  When ``registration_mode = require_application`` the
     creation is rejected with ``registration_application_answer_required``
     because the OIDC flow has no field to carry the
-    application-question answer.  ``open`` is correct for a
-    single-tenant openhost-lemmy where only the zone owner ever
-    signs in via SSO; remote federated users on other instances are
-    not affected by this setting.
+    application-question answer. The public nginx boundary blocks
+    Lemmy's native registration endpoints, so only the owner-gated
+    OIDC flow can use this otherwise-open backend setting. Remote
+    federated users on other instances are not affected.
     """
     if local_site.get("registration_mode") == "open":
         print("[bootstrap] registration_mode is already 'open'")
@@ -458,9 +467,7 @@ def _find_person_id(jwt_token: str, username: str) -> int | None:
     The 0.19.x naming was ``GET /api/v3/user?username=...`` — the
     rename to ``person`` shipped with the 1.0-alpha API surface.
     """
-    status, payload = _request(
-        "GET", f"/person?username={username}", auth=jwt_token
-    )
+    status, payload = _request("GET", f"/person?username={username}", auth=jwt_token)
     if status != 200:
         return None
     person = payload.get("person_view", {}).get("person", {})
@@ -536,7 +543,9 @@ def _watch_for_sso_user_and_promote(
             return
         person_id = _find_person_id(jwt_token, SSO_USERNAME)
         if person_id is not None:
-            print(f"[bootstrap] {SSO_USERNAME!r} appeared (person_id={person_id}); promoting")
+            print(
+                f"[bootstrap] {SSO_USERNAME!r} appeared (person_id={person_id}); promoting"
+            )
             status, payload = _request(
                 "POST",
                 "/admin/add",
@@ -550,7 +559,9 @@ def _watch_for_sso_user_and_promote(
                     file=sys.stderr,
                 )
             else:
-                print(f"[bootstrap] {SSO_USERNAME!r} promoted to admin; watcher exiting")
+                print(
+                    f"[bootstrap] {SSO_USERNAME!r} promoted to admin; watcher exiting"
+                )
                 return
         time.sleep(poll_interval_seconds)
     print(
@@ -560,6 +571,8 @@ def _watch_for_sso_user_and_promote(
 
 
 def main() -> int:
+    if BOOTSTRAP_MODE not in {"reconcile", "watch"}:
+        raise SystemExit(f"[bootstrap] invalid BOOTSTRAP_MODE: {BOOTSTRAP_MODE!r}")
     _wait_for_lemmy()
     # Re-stamp the provisioning admin's bcrypt password to match the
     # ephemeral in-memory ADMIN_PASSWORD before we try to log in — on
@@ -574,8 +587,14 @@ def main() -> int:
     jwt_token = _login(login_username)
     site = _site(jwt_token)
 
+    if BOOTSTRAP_MODE == "watch":
+        _watch_for_sso_user_and_promote(jwt_token)
+        print("[bootstrap] watcher done")
+        return 0
+
     providers = site.get("admin_oauth_providers") or []
-    _reconcile_provider(jwt_token, providers)
+    provider_id = _reconcile_provider(jwt_token, providers)
+    _write_provider_id(provider_id)
 
     local_site = site.get("site_view", {}).get("local_site", {})
     _ensure_open_registration(jwt_token, local_site)
@@ -583,13 +602,7 @@ def main() -> int:
     admins = site.get("admins") or []
     _ensure_admin(jwt_token, admins)
 
-    # If the SSO user already exists and is admin, we're done.
-    # Otherwise, hang around polling for them to appear so we can
-    # auto-promote on first SSO sign-in.
-    if not any(a.get("person", {}).get("name") == SSO_USERNAME for a in admins):
-        _watch_for_sso_user_and_promote(jwt_token)
-
-    print("[bootstrap] done")
+    print("[bootstrap] reconciliation done")
     return 0
 
 
