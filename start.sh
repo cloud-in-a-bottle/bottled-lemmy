@@ -93,7 +93,9 @@ if [[ ! -d "$PG_DATA/base" ]]; then
     # than the user running the daemon.
     chown postgres:postgres "$PG_DATA"
     chmod 0700 "$PG_DATA"
-    gosu postgres "$PG_BIN/initdb" -D "$PG_DATA" --auth=trust --username=postgres --encoding=UTF8 --locale=C 2>&1 | tail -10
+    gosu postgres "$PG_BIN/initdb" -D "$PG_DATA" \
+        --auth-local=trust --auth-host=trust \
+        --username=postgres --encoding=UTF8 --locale=C 2>&1 | tail -10
 fi
 
 # Pin Postgres to localhost only.  Rootless podman gives the

@@ -31,6 +31,7 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("postgres://lemmy:", start)
         self.assertNotIn("__POSTGRES_PASSWORD__", config)
         self.assertIn("postgres://lemmy@127.0.0.1:5432/lemmy", config)
+        self.assertIn("--auth-host=trust", start)
         self.assertIn('OIDC_DATA_DIR="$LEMMY_RUNTIME_DIR/oidc"', start)
         self.assertIn('rm -rf "$PERSIST/oidc"', start)
         self.assertLess(
