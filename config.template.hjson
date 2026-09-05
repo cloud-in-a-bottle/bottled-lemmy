@@ -3,6 +3,10 @@
     connection: "postgres://lemmy@127.0.0.1:5432/lemmy"
     pool_size: 10
   }
+  pictrs: {
+    url: "http://127.0.0.1:8081/"
+    api_key: "__PICTRS_API_KEY__"
+  }
   hostname: "__HOSTNAME__"
   bind: "127.0.0.1"
   port: 8536

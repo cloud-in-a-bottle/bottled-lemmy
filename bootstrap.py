@@ -89,7 +89,7 @@ OIDC_PROVIDER_ID_FILE = os.environ.get(
 )
 
 PROVIDER_DISPLAY = "OpenHost"
-DEFAULT_SITE_SIDEBAR = """**About this instance**
+LEGACY_IMAGE_NOTICE = """**About this instance**
 
 This Cloud in a Bottle package supports text posts, link posts, comments, votes,
 and ActivityPub federation. Image uploads, avatars, thumbnails, and proxied remote
@@ -467,21 +467,19 @@ def _ensure_registration_mode(
         raise SystemExit(1)
 
 
-def _ensure_default_site_sidebar(jwt_token: str, site: dict) -> None:
-    """Explain the image limitation in-product without replacing owner content."""
+def _remove_obsolete_image_notice(jwt_token: str, site: dict) -> None:
+    """Remove the exact notice installed by releases that lacked pict-rs."""
     current = site.get("site_view", {}).get("site", {}).get("sidebar")
-    if isinstance(current, str) and current.strip():
+    if not isinstance(current, str) or current.strip() != LEGACY_IMAGE_NOTICE.strip():
         return
-    status, _ = _request(
-        "PUT", "/site", {"sidebar": DEFAULT_SITE_SIDEBAR}, auth=jwt_token
-    )
+    status, _ = _request("PUT", "/site", {"sidebar": ""}, auth=jwt_token)
     if status >= 400:
         print(
-            f"[bootstrap] FATAL: PUT /site (default sidebar) returned status={status}",
+            f"[bootstrap] FATAL: PUT /site (obsolete sidebar) returned status={status}",
             file=sys.stderr,
         )
         raise SystemExit(1)
-    print("[bootstrap] installed the default image-support notice")
+    print("[bootstrap] removed the obsolete image-support notice")
 
 
 def _ensure_read_rate_limit(jwt_token: str, site: dict) -> None:
@@ -665,7 +663,7 @@ def main() -> int:
         "closed" if _find_person_id(jwt_token, SSO_USERNAME) is not None else "open"
     )
     _ensure_registration_mode(jwt_token, local_site, desired_registration_mode)
-    _ensure_default_site_sidebar(jwt_token, site)
+    _remove_obsolete_image_notice(jwt_token, site)
     _ensure_read_rate_limit(jwt_token, site)
 
     admins = site.get("admins") or []

@@ -13,6 +13,7 @@ class PackagingTests(unittest.TestCase):
         versions = re.findall(r"FROM dessalines/lemmy(?:-ui)?:(\S+)", dockerfile)
 
         self.assertEqual(versions, ["1.0.0-beta.1", "1.0.0-beta.1"])
+        self.assertIn("FROM asonix/pictrs:0.5.24 AS pictrs-source", dockerfile)
 
     def test_manifest_uses_current_resource_fields(self):
         with (ROOT / "openhost.toml").open("rb") as manifest_file:
@@ -20,8 +21,8 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["routing"]["public_paths"], ["/"])
         self.assertEqual(manifest["routing"]["health_check"], "/_healthz")
-        self.assertEqual(manifest["resources"]["cpu_cores"], 1.0)
-        self.assertEqual(manifest["resources"]["memory_mb"], 1024)
+        self.assertEqual(manifest["resources"]["cpu_cores"], 1.5)
+        self.assertEqual(manifest["resources"]["memory_mb"], 1536)
         self.assertEqual(manifest["resources"]["build_memory_mb"], 2048)
         self.assertNotIn("cpu_millicores", manifest["resources"])
         self.assertEqual(manifest["data"], {"app_data": True})
@@ -45,6 +46,8 @@ class PackagingTests(unittest.TestCase):
             start.index('echo "[start.sh] Starting nginx'),
         )
         self.assertIn('wait -n "$PG_PID"', start)
+        self.assertIn('wait -n "$PG_PID" "$PICTRS_PID"', start)
+        self.assertIn("__PICTRS_API_KEY__", config)
 
     def test_catalog_documentation_sections_and_license_exist(self):
         readme = (ROOT / "README.md").read_text()
