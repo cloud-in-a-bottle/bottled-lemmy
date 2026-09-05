@@ -113,9 +113,10 @@ that trusted header can start the owner OIDC flow.
 
 ## Resources
 
-The manifest requests 2 GiB RAM and 1.5 CPU cores for both build and runtime.
-This is appropriate for a personal or small-community instance. Larger instances
-need resource limits based on their database size and federation traffic.
+The manifest requests 1 GiB RAM and 1 CPU core at runtime, with 2 GiB available
+during image builds. The complete stack used about 304 MB during catalog smoke
+testing, leaving headroom for migrations and federation bursts. Larger instances
+need limits based on their database size and federation traffic.
 
 ## Troubleshooting
 

@@ -19,7 +19,8 @@ class PackagingTests(unittest.TestCase):
             manifest = tomllib.load(manifest_file)
 
         self.assertEqual(manifest["routing"]["public_paths"], ["/"])
-        self.assertEqual(manifest["resources"]["cpu_cores"], 1.5)
+        self.assertEqual(manifest["resources"]["cpu_cores"], 1.0)
+        self.assertEqual(manifest["resources"]["memory_mb"], 1024)
         self.assertEqual(manifest["resources"]["build_memory_mb"], 2048)
         self.assertNotIn("cpu_millicores", manifest["resources"])
         self.assertEqual(manifest["data"], {"app_data": True})
