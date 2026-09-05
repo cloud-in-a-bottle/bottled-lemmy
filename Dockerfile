@@ -43,7 +43,38 @@ FROM dessalines/lemmy:1.0.0-beta.1 AS backend-source
 # media tools come from the final Debian image.
 FROM asonix/pictrs:0.5.24 AS pictrs-source
 
-# Stage 4: final image.  Debian bookworm matches the upstream
+# Stage 4: ImageMagick 7. Debian Bookworm only packages ImageMagick 6,
+# while pict-rs requires the ImageMagick 7 `magick` interface.
+FROM debian:bookworm-slim AS imagemagick-source
+ARG IMAGEMAGICK_VERSION=7.1.1-47
+ARG IMAGEMAGICK_SHA256=818e21a248986f15a6ba0221ab3ccbaed3d3abee4a6feb4609c6f2432a30d7ed
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        libheif-dev \
+        libjpeg62-turbo-dev \
+        libltdl-dev \
+        libpng-dev \
+        libwebp-dev \
+        libxml2-dev \
+        pkg-config \
+ && curl -fsSL -o /tmp/imagemagick.tar.gz \
+        "https://github.com/ImageMagick/ImageMagick/archive/refs/tags/${IMAGEMAGICK_VERSION}.tar.gz" \
+ && printf '%s  %s\n' "$IMAGEMAGICK_SHA256" /tmp/imagemagick.tar.gz | sha256sum -c - \
+ && tar -xzf /tmp/imagemagick.tar.gz -C /tmp \
+ && cd "/tmp/ImageMagick-${IMAGEMAGICK_VERSION}" \
+ && ./configure \
+        --prefix=/opt/imagemagick \
+        --disable-static \
+        --enable-shared \
+        --with-modules \
+        --without-x \
+ && make -j2 \
+ && make install
+
+# Stage 5: final image.  Debian bookworm matches the upstream
 # lemmy_server build environment so libpq / glibc versions agree.
 FROM debian:bookworm-slim
 
@@ -74,8 +105,13 @@ RUN apt-get update -qq \
         python3-bcrypt \
         python3-uvicorn \
         ffmpeg \
-        imagemagick \
         libimage-exiftool-perl \
+        libheif1 \
+        libjpeg62-turbo \
+        libltdl7 \
+        libpng16-16 \
+        libwebp7 \
+        libxml2 \
         curl \
         tini \
         gosu \
@@ -111,6 +147,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # build).  Drop into /usr/local/bin where it'll be on PATH.
 COPY --from=backend-source /usr/local/bin/lemmy_server /usr/local/bin/lemmy_server
 COPY --from=pictrs-source /usr/local/bin/pict-rs /usr/local/bin/pict-rs
+COPY --from=imagemagick-source /opt/imagemagick /opt/imagemagick
 
 # lemmy-ui: copy the compiled JS bundle.  We DON'T copy the
 # upstream node binary — that image is Alpine (musl libc) and
@@ -129,10 +166,10 @@ COPY config.template.hjson /opt/openhost-lemmy/config.template.hjson
 COPY oidc_bridge.py        /opt/openhost-lemmy/oidc_bridge.py
 COPY bootstrap.py          /opt/openhost-lemmy/bootstrap.py
 COPY sso_bounce.py         /opt/openhost-lemmy/sso_bounce.py
-COPY magick                 /usr/local/bin/magick
 COPY start.sh              /opt/openhost-lemmy/start.sh
 
-RUN chmod 0755 /usr/local/bin/magick
+ENV PATH="/opt/imagemagick/bin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/imagemagick/lib"
 
 EXPOSE 8080
 

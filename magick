@@ -1,7 +1,0 @@
-#!/bin/sh
-# pict-rs uses ImageMagick 7's `magick convert ...` interface. Debian
-# Bookworm ships ImageMagick 6, whose equivalent entrypoint is `convert`.
-if [ "$1" = "convert" ]; then
-    shift
-fi
-exec /usr/bin/convert "$@"
