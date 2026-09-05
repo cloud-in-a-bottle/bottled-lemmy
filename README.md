@@ -141,7 +141,7 @@ This does not weaken SSO. The Cloud in a Bottle router still verifies the owner'
 ## How this is built
 
 - **Base**: `debian:bookworm-slim`. Matches the upstream `dessalines/lemmy` build environment so libpq and glibc agree.
-- **lemmy_server binary**: copied from `dessalines/lemmy:1.0.0-alpha.18` via `COPY --from=...` (OAuth/OIDC — required for SSO — landed only in the 1.0 series; 0.19.x has no `oauth_provider` API).
-- **lemmy-ui**: copied from `dessalines/lemmy-ui:1.0.0-alpha.18` (JS bundle only; Node itself comes from NodeSource apt because the upstream image is musl/Alpine).
+- **lemmy_server binary**: copied from `dessalines/lemmy:1.0.0-beta.1` via `COPY --from=...` (OAuth/OIDC — required for SSO — landed only in the 1.0 series; 0.19.x has no `oauth_provider` API).
+- **lemmy-ui**: copied from `dessalines/lemmy-ui:1.0.0-beta.1` (JS bundle only; Node itself comes from NodeSource apt because the upstream image is musl/Alpine).
 - **Postgres**: `postgresql-16` from the pgdg apt repo.
 - **Python services** (oidc_bridge, sso_bounce, bootstrap): `starlette` + `python3-jwt` + `python3-cryptography` + `uvicorn`, all from apt — no `pip install` step in the build.

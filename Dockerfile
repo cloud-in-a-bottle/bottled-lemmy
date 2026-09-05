@@ -30,14 +30,14 @@
 #   * nginx         — request router on :8080.
 
 # Stage 1: lemmy-ui binaries.
-# We pin Lemmy 1.0.0-alpha.18 (released 2026-05-04) because OAuth/
+# We pin Lemmy 1.0.0-beta.1 because OAuth/
 # OIDC support — required for our SSO flow — landed only in the
-# 1.0 series; 0.19.x does not expose the /api/v3/oauth_provider
+# 1.0 series; 0.19.x does not expose the OAuth provider API
 # endpoint we need.  See LemmyNet/lemmy#4881.
-FROM dessalines/lemmy-ui:1.0.0-alpha.18 AS ui-source
+FROM dessalines/lemmy-ui:1.0.0-beta.1 AS ui-source
 
 # Stage 2: lemmy backend.
-FROM dessalines/lemmy:1.0.0-alpha.18 AS backend-source
+FROM dessalines/lemmy:1.0.0-beta.1 AS backend-source
 
 # Stage 3: final image.  Debian bookworm matches the upstream
 # lemmy_server build environment so libpq / glibc versions agree.

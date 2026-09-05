@@ -290,7 +290,7 @@ echo "[start.sh] Starting lemmy-ui on 127.0.0.1:1234"
 # "invalid Header provided" while the SPA shows a 500 error
 # page (which is what an /oauth/callback render hits because it
 # can't fail-soft like the other routes).  See
-# https://github.com/LemmyNet/lemmy-ui/blob/1.0.0-alpha.18/src/shared/utils/env.ts#L28
+# https://github.com/LemmyNet/lemmy-ui/blob/1.0.0-beta.1/src/shared/utils/env.ts#L28
 # for the protocol-prefix logic.
 # Both the v1.x env-var pair (LEMMY_UI_BACKEND_INTERNAL /
 # LEMMY_UI_BACKEND, canonical for v1.0.0-alpha+) and the legacy
