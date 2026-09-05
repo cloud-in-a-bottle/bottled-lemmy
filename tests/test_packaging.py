@@ -19,6 +19,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("FROM asonix/pictrs:0.5.24 AS pictrs-source", dockerfile)
         self.assertIn("IMAGEMAGICK_VERSION=7.1.1-47", dockerfile)
         self.assertIn("IMAGEMAGICK_SHA256=818e21a248986f15", dockerfile)
+        self.assertIn("--without-modules", dockerfile)
         self.assertNotIn("COPY magick", dockerfile)
 
     def test_manifest_uses_current_resource_fields(self):

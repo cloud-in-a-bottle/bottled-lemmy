@@ -70,7 +70,7 @@ RUN apt-get update -qq \
         --prefix=/opt/imagemagick \
         --disable-static \
         --enable-shared \
-        --with-modules \
+        --without-modules \
         --without-x \
  && make -j2 \
  && make install
