@@ -101,7 +101,8 @@ class SecurityBoundaryTests(unittest.TestCase):
             "location = /api/v4/account/auth/register { return 403; }", config
         )
         self.assertIn("location = /api/v3/user/register { return 403; }", config)
-        self.assertIn('map "$request_method:$http_accept" $app_upstream', config)
+        self.assertIn("map $http_accept $accept_upstream", config)
+        self.assertIn("map $request_method $app_upstream", config)
         self.assertIn("proxy_pass $app_upstream;", config)
         self.assertNotIn("proxy_intercept_errors on", config)
 
