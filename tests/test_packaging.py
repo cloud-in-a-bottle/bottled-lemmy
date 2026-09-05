@@ -57,6 +57,11 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue((ROOT / "LICENSE").is_file())
         self.assertTrue((ROOT / "NOTICE").is_file())
 
+    def test_bouncer_avoids_python_312_only_multiline_fstrings(self):
+        source = (ROOT / "sso_bounce.py").read_text()
+
+        self.assertNotIn('f"{PUBLIC_BASE}/_oidc/authorize?{\n', source)
+
 
 if __name__ == "__main__":
     unittest.main()

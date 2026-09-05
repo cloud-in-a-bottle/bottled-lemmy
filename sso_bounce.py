@@ -116,17 +116,16 @@ async def bounce(request: Request) -> Response:
     expires_at = "Date.now() + 5 * 60 * 1000"  # JS expression
     redirect_uri = _redirect_uri(request)
     prev = _safe_prev(request.query_params.get("prev", "/"))
-    authorize_url = f"{PUBLIC_BASE}/_oidc/authorize?{
-        urlencode(
-            {
-                'client_id': CLIENT_ID,
-                'response_type': 'code',
-                'scope': 'openid email profile',
-                'redirect_uri': redirect_uri,
-                'state': state,
-            }
-        )
-    }"
+    authorize_params = urlencode(
+        {
+            "client_id": CLIENT_ID,
+            "response_type": "code",
+            "scope": "openid email profile",
+            "redirect_uri": redirect_uri,
+            "state": state,
+        }
+    )
+    authorize_url = f"{PUBLIC_BASE}/_oidc/authorize?{authorize_params}"
     nonce = secrets.token_urlsafe(18)
 
     page = f"""<!doctype html>
