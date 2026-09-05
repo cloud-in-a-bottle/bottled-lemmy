@@ -95,6 +95,8 @@ This Cloud in a Bottle package supports text posts, link posts, comments, votes,
 and ActivityPub federation. Image uploads, avatars, thumbnails, and proxied remote
 images are unavailable because pict-rs is not bundled.
 """
+MESSAGE_RATE_MAX_REQUESTS = 600
+MESSAGE_RATE_INTERVAL_SECONDS = 60
 
 
 def _request(
@@ -482,6 +484,35 @@ def _ensure_default_site_sidebar(jwt_token: str, site: dict) -> None:
     print("[bootstrap] installed the default image-support notice")
 
 
+def _ensure_read_rate_limit(jwt_token: str, site: dict) -> None:
+    """Keep normal public browsing below a bounded but practical limit."""
+    current = site.get("site_view", {}).get("local_site_rate_limit", {})
+    if (
+        current.get("message_max_requests") == MESSAGE_RATE_MAX_REQUESTS
+        and current.get("message_interval_seconds") == MESSAGE_RATE_INTERVAL_SECONDS
+    ):
+        return
+    status, _ = _request(
+        "PUT",
+        "/site",
+        {
+            "rate_limit_message_max_requests": MESSAGE_RATE_MAX_REQUESTS,
+            "rate_limit_message_interval_seconds": MESSAGE_RATE_INTERVAL_SECONDS,
+        },
+        auth=jwt_token,
+    )
+    if status >= 400:
+        print(
+            f"[bootstrap] FATAL: PUT /site (read rate limit) returned status={status}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    print(
+        f"[bootstrap] set the read rate limit to "
+        f"{MESSAGE_RATE_MAX_REQUESTS} requests/{MESSAGE_RATE_INTERVAL_SECONDS}s"
+    )
+
+
 def _find_person_id(jwt_token: str, username: str) -> int | None:
     """Look up a local person's id by username.  Returns None if no
     such user exists yet.
@@ -635,6 +666,7 @@ def main() -> int:
     )
     _ensure_registration_mode(jwt_token, local_site, desired_registration_mode)
     _ensure_default_site_sidebar(jwt_token, site)
+    _ensure_read_rate_limit(jwt_token, site)
 
     admins = site.get("admins") or []
     _ensure_admin(jwt_token, admins)

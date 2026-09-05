@@ -118,6 +118,10 @@ during image builds. The complete stack used about 304 MB during catalog smoke
 testing, leaving headroom for migrations and federation bursts. Larger instances
 need limits based on their database size and federation traffic.
 
+The general read/API rate limit is 600 requests per minute. Write, registration,
+image, and search actions retain Lemmy's stricter defaults. The app health check
+uses `/_healthz`, which is not charged against a visitor's API bucket.
+
 ## Troubleshooting
 
 Check status and logs with:

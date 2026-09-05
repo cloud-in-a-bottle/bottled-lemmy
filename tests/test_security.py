@@ -146,6 +146,25 @@ class SecurityBoundaryTests(unittest.TestCase):
         body = request.call_args.args[2]
         self.assertIn("pict-rs is not bundled", body["sidebar"])
 
+    def test_read_rate_limit_is_raised_without_weakening_action_limits(self):
+        site = {
+            "site_view": {
+                "local_site_rate_limit": {
+                    "message_max_requests": 180,
+                    "message_interval_seconds": 60,
+                }
+            }
+        }
+        with patch.object(
+            self.bootstrap, "_request", return_value=(200, {})
+        ) as request:
+            self.bootstrap._ensure_read_rate_limit("token", site)
+
+        body = request.call_args.args[2]
+        self.assertEqual(body["rate_limit_message_max_requests"], 600)
+        self.assertEqual(body["rate_limit_message_interval_seconds"], 60)
+        self.assertEqual(len(body), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

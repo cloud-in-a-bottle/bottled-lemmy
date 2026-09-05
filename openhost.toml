@@ -1,6 +1,6 @@
 [app]
 name = "lemmy"
-version = "0.2.0"
+version = "0.2.1"
 description = "Federated link aggregator with owner SSO and public read-only browsing"
 authors = ["Andrew Laack <andrew@laack.co>"]
 
@@ -16,7 +16,7 @@ image = "Dockerfile"
 port = 8080
 
 [routing]
-health_check = "/api/v3/site"
+health_check = "/_healthz"
 # Lemmy is a public link-aggregator: anonymous visitors (and remote
 # ActivityPub servers) must be able to browse the whole instance —
 # the web UI, community/user/post pages, the federation surface
