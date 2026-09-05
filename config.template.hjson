@@ -1,6 +1,6 @@
 {
   database: {
-    connection: "postgresql:///lemmy?host=/var/run/postgresql"
+    connection: "postgres://lemmy@127.0.0.1:5432/lemmy"
     pool_size: 10
   }
   hostname: "__HOSTNAME__"

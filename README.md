@@ -47,7 +47,8 @@ subscriptions, moderation state, and the configured OAuth provider.
 No usable password, token, OIDC signing key, or OIDC client secret is written as
 a standalone persistent file:
 
-- PostgreSQL uses its private Unix socket and does not need a database password.
+- PostgreSQL accepts only container-local connections and does not need a
+  database password.
 - The internal provisioning-admin password is random, exists only for the
   container boot, and is replaced on every restart.
 - The OIDC signing key and client secret live under `/run/lemmy`, rotate on every
@@ -62,8 +63,8 @@ Do not copy a running PostgreSQL data directory file by file. Use one of these
 methods:
 
 1. Stop the Lemmy app, then back up `$BOTTLE_APP_DATA_DIR/postgres/`.
-2. While the app is running, execute `pg_dump -U lemmy -d lemmy` through the
-   PostgreSQL Unix socket and back up the resulting logical dump.
+2. While the app is running, execute `pg_dump -h 127.0.0.1 -U lemmy -d lemmy`
+   and back up the resulting logical dump.
 
 Restore into the same public hostname. A Lemmy hostname is part of every
 ActivityPub actor and object identity; changing it breaks existing federation
@@ -90,7 +91,7 @@ One container runs:
 | nginx | `0.0.0.0:8080` | Public routing and registration guard |
 | lemmy_server | `127.0.0.1:8536` | API and ActivityPub backend |
 | lemmy-ui | `127.0.0.1:1234` | Web interface and SSR |
-| PostgreSQL 16 | Unix socket and `127.0.0.1:5432` | Persistent metadata |
+| PostgreSQL 16 | `127.0.0.1:5432` | Persistent metadata |
 | OIDC bridge | `127.0.0.1:7000` | Owner SSO provider |
 | SSO bouncer | `127.0.0.1:7100` | Starts lemmy-ui's OAuth flow |
 
