@@ -30,14 +30,15 @@
 #   * nginx         — request router on :8080.
 
 # Stage 1: lemmy-ui binaries.
-# We pin Lemmy 1.0.0-beta.1 because OAuth/
-# OIDC support — required for our SSO flow — landed only in the
-# 1.0 series; 0.19.x does not expose the OAuth provider API
-# endpoint we need.  See LemmyNet/lemmy#4881.
-FROM dessalines/lemmy-ui:1.0.0-beta.1 AS ui-source
+# OAuth/OIDC support requires Lemmy 1.0. beta.1 has a known recursive
+# federation stack overflow (LemmyNet/lemmy#6650), so these nightly
+# images are pinned by immutable digest and documented source revision.
+# lemmy-ui revision: c277a8adba68faa39f76a72716bae319e4cd09b8
+FROM dessalines/lemmy-ui:nightly@sha256:5d8049587beb01c8896afc5878593485c2d562cd6e5d4df82ceff5d426f16f10 AS ui-source
 
 # Stage 2: lemmy backend.
-FROM dessalines/lemmy:1.0.0-beta.1 AS backend-source
+# Lemmy revision: 439734dd638a2c06a2f907beab7dcf4646e88f86
+FROM dessalines/lemmy:nightly@sha256:75d7d7a092c5990926ca49f40c77ff60f6127c35894c00ae0bea475b262af271 AS backend-source
 
 # Stage 3: pict-rs image service. The binary is statically linked;
 # media tools come from the final Debian image.

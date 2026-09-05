@@ -12,7 +12,7 @@ owner sign-in.
 - Native local registration disabled; the owner account is created through SSO.
 - Persistent posts, communities, subscriptions, and account state.
 - Image uploads, avatars, thumbnails, and proxied remote media through pict-rs.
-- Matching Lemmy backend and UI versions, currently `1.0.0-beta.1`.
+- A matched, immutable Lemmy 1.0 backend/UI snapshot.
 
 ## Usage
 
@@ -83,9 +83,9 @@ versions. Test owner SSO, public browsing, and a remote subscription before
 publishing an upgrade.
 
 This package uses Lemmy 1.0 because native OAuth/OIDC support is required for
-owner SSO. `1.0.0-beta.1` is the most stable release with that feature and also
-contains the compatibility fix for `Accept` activities sent by Lemmy 0.19
-instances.
+owner SSO. The backend and UI are pinned by immutable image digest and source
+revision. The snapshot includes the Lemmy 0.19 federation-acceptance fix and
+avoids beta.1's recursive federation stack overflow (LemmyNet/lemmy#6650).
 
 ## Architecture
 
