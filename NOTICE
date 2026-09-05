@@ -8,4 +8,5 @@ https://github.com/LemmyNet/lemmy-ui
 
 The container also includes unmodified components distributed under their
 respective licenses, including PostgreSQL, nginx, Node.js, Debian, Starlette,
-Uvicorn, PyJWT, cryptography, bcrypt, gosu, and tini.
+Uvicorn, PyJWT, cryptography, bcrypt, pict-rs, ImageMagick, ffmpeg, ExifTool,
+gosu, and tini.

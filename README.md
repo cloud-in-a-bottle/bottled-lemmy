@@ -11,6 +11,7 @@ owner sign-in.
 - Public, read-only browsing for guests and ActivityPub peers.
 - Native local registration disabled; the owner account is created through SSO.
 - Persistent posts, communities, subscriptions, and account state.
+- Image uploads, avatars, thumbnails, and proxied remote media through pict-rs.
 - Matching Lemmy backend and UI versions, currently `1.0.0-beta.1`.
 
 ## Usage
@@ -41,9 +42,11 @@ The app becomes available at `https://lemmy.<zone>/`.
 
 ## Data
 
-All persistent state lives under `$BOTTLE_APP_DATA_DIR/postgres/` as a
-PostgreSQL 16 cluster. It contains Lemmy accounts, posts, comments, communities,
-subscriptions, moderation state, and the configured OAuth provider.
+Persistent state lives under `$BOTTLE_APP_DATA_DIR/`:
+
+- `postgres/` is the PostgreSQL 16 cluster containing accounts, posts, comments,
+  communities, subscriptions, moderation state, and OAuth configuration.
+- `pictrs/` contains pict-rs metadata, original media, and generated variants.
 
 No usable password, token, OIDC signing key, or OIDC client secret is written as
 a standalone persistent file:
@@ -63,7 +66,8 @@ a standalone persistent file:
 Do not copy a running PostgreSQL data directory file by file. Use one of these
 methods:
 
-1. Stop the Lemmy app, then back up `$BOTTLE_APP_DATA_DIR/postgres/`.
+1. Stop the Lemmy app, then back up `$BOTTLE_APP_DATA_DIR/postgres/` and
+   `$BOTTLE_APP_DATA_DIR/pictrs/` together.
 2. While the app is running, execute `pg_dump -h 127.0.0.1 -U lemmy -d lemmy`
    and back up the resulting logical dump.
 
@@ -93,11 +97,12 @@ One container runs:
 | lemmy_server | `127.0.0.1:8536` | API and ActivityPub backend |
 | lemmy-ui | `127.0.0.1:1234` | Web interface and SSR |
 | PostgreSQL 16 | `127.0.0.1:5432` | Persistent metadata |
+| pict-rs 0.5.24 | `127.0.0.1:8081` | Image storage, proxying, and processing |
 | OIDC bridge | `127.0.0.1:7000` | Owner SSO provider |
 | SSO bouncer | `127.0.0.1:7100` | Starts lemmy-ui's OAuth flow |
 
-`start.sh` starts PostgreSQL and Lemmy, waits for migrations, reconciles the OIDC
-provider, and only then exposes nginx. PostgreSQL and all serving processes are
+`start.sh` starts PostgreSQL and pict-rs, waits for both, starts Lemmy, reconciles
+the OIDC provider, and only then exposes nginx. All serving processes are
 supervised; an unexpected exit stops the container so Cloud in a Bottle can
 restart it.
 
@@ -113,10 +118,10 @@ that trusted header can start the owner OIDC flow.
 
 ## Resources
 
-The manifest requests 1 GiB RAM and 1 CPU core at runtime, with 2 GiB available
-during image builds. The complete stack used about 304 MB during catalog smoke
-testing, leaving headroom for migrations and federation bursts. Larger instances
-need limits based on their database size and federation traffic.
+The manifest requests 1.5 GiB RAM and 1.5 CPU cores at runtime, with 2 GiB
+available during image builds. This leaves processing headroom for ImageMagick
+and ffmpeg alongside Lemmy's normal application stack. Larger instances need
+limits based on database size, federation traffic, and concurrent media work.
 
 The general read/API rate limit is 600 requests per minute. Write, registration,
 image, and search actions retain Lemmy's stricter defaults. The app health check
@@ -146,8 +151,9 @@ fresh Follow activity.
 
 ## Caveats
 
-- **No pict-rs:** image uploads, avatars, thumbnails, and proxied remote images
-  are unavailable. Text posts, links, comments, votes, and federation work.
+- **20 MiB upload limit:** nginx rejects larger request bodies before pict-rs.
+- **Local media storage:** pict-rs media is included in app-data backups and can
+  grow substantially on active federated instances.
 - **Single owner:** Cloud in a Bottle SSO maps to one local Lemmy admin. Other
   people participate through accounts on federated instances.
 - **No outbound email:** confirmation and password-reset email are unavailable.

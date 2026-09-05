@@ -133,18 +133,20 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertNotIn("bcrypt-secret", stderr.getvalue())
         self.assertIn("timed out after 30 seconds", stderr.getvalue())
 
-    def test_default_sidebar_is_created_once_without_overwriting_owner_content(self):
-        empty_site = {"site_view": {"site": {}}}
+    def test_obsolete_image_notice_is_removed_without_overwriting_owner_content(self):
+        old_site = {
+            "site_view": {"site": {"sidebar": self.bootstrap.LEGACY_IMAGE_NOTICE}}
+        }
         custom_site = {"site_view": {"site": {"sidebar": "Owner content"}}}
         with patch.object(
             self.bootstrap, "_request", return_value=(200, {})
         ) as request:
-            self.bootstrap._ensure_default_site_sidebar("token", empty_site)
-            self.bootstrap._ensure_default_site_sidebar("token", custom_site)
+            self.bootstrap._remove_obsolete_image_notice("token", old_site)
+            self.bootstrap._remove_obsolete_image_notice("token", custom_site)
 
         request.assert_called_once()
         body = request.call_args.args[2]
-        self.assertIn("pict-rs is not bundled", body["sidebar"])
+        self.assertEqual(body["sidebar"], "")
 
     def test_read_rate_limit_is_raised_without_weakening_action_limits(self):
         site = {
