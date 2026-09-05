@@ -39,11 +39,7 @@ FROM dessalines/lemmy-ui:1.0.0-beta.1 AS ui-source
 # Stage 2: lemmy backend.
 FROM dessalines/lemmy:1.0.0-beta.1 AS backend-source
 
-# Stage 3: pict-rs image service. The binary is statically linked;
-# media tools come from the final Debian image.
-FROM asonix/pictrs:0.5.24 AS pictrs-source
-
-# Stage 4: final image.  Debian bookworm matches the upstream
+# Stage 3: final image.  Debian bookworm matches the upstream
 # lemmy_server build environment so libpq / glibc versions agree.
 FROM debian:bookworm-slim
 
@@ -73,9 +69,6 @@ RUN apt-get update -qq \
         python3-cryptography \
         python3-bcrypt \
         python3-uvicorn \
-        ffmpeg \
-        imagemagick \
-        libimage-exiftool-perl \
         curl \
         tini \
         gosu \
@@ -110,7 +103,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # lemmy_server binary (statically-linked Rust, debian-bookworm
 # build).  Drop into /usr/local/bin where it'll be on PATH.
 COPY --from=backend-source /usr/local/bin/lemmy_server /usr/local/bin/lemmy_server
-COPY --from=pictrs-source /usr/local/bin/pict-rs /usr/local/bin/pict-rs
 
 # lemmy-ui: copy the compiled JS bundle.  We DON'T copy the
 # upstream node binary — that image is Alpine (musl libc) and
@@ -129,10 +121,7 @@ COPY config.template.hjson /opt/openhost-lemmy/config.template.hjson
 COPY oidc_bridge.py        /opt/openhost-lemmy/oidc_bridge.py
 COPY bootstrap.py          /opt/openhost-lemmy/bootstrap.py
 COPY sso_bounce.py         /opt/openhost-lemmy/sso_bounce.py
-COPY magick                 /usr/local/bin/magick
 COPY start.sh              /opt/openhost-lemmy/start.sh
-
-RUN chmod 0755 /usr/local/bin/magick
 
 EXPOSE 8080
 

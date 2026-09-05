@@ -34,7 +34,6 @@ ZONE_DOMAIN="${BOTTLE_ZONE_DOMAIN:-${OPENHOST_ZONE_DOMAIN:-localhost}}"
 APP_NAME="${BOTTLE_APP_NAME:-${OPENHOST_APP_NAME:-lemmy}}"
 APP_HOST="${APP_NAME}.${ZONE_DOMAIN}"
 PG_PID=""
-PICTRS_PID=""
 LEMMY_PID=""
 UI_PID=""
 BRIDGE_PID=""
@@ -76,7 +75,7 @@ PG_BIN="/usr/lib/postgresql/16/bin"
 
 cleanup() {
     trap - EXIT TERM INT
-    for pid in "$NGINX_PID" "$BOUNCE_PID" "$BRIDGE_PID" "$UI_PID" "$LEMMY_PID" "$PICTRS_PID" "$BOOTSTRAP_PID"; do
+    for pid in "$NGINX_PID" "$BOUNCE_PID" "$BRIDGE_PID" "$UI_PID" "$LEMMY_PID" "$BOOTSTRAP_PID"; do
         [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null || true
     done
     if [[ -n "$PG_PID" ]] && kill -0 "$PG_PID" 2>/dev/null; then
@@ -197,7 +196,6 @@ echo "[start.sh] SSO user will be '$SSO_USERNAME' (owner username: '$OWNER_USERN
 # outside this container lifetime.
 OIDC_CLIENT_SECRET="$(head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 48)"
 OIDC_CLIENT_ID="openhost-lemmy"
-PICTRS_API_KEY="$(head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 48)"
 
 # -----------------------------------------------------------------
 # Render Lemmy config
@@ -220,44 +218,9 @@ sed \
     -e "s|__HOSTNAME__|$APP_HOST|g" \
     -e "s|__ADMIN_PASSWORD__|$ADMIN_PASSWORD|g" \
     -e "s|__PROVISION_ADMIN_USERNAME__|$PROVISION_ADMIN_USERNAME|g" \
-    -e "s|__PICTRS_API_KEY__|$PICTRS_API_KEY|g" \
     /opt/openhost-lemmy/config.template.hjson > "$LEMMY_CONFIG"
 chown lemmy:lemmy "$LEMMY_CONFIG"
 chmod 0600 "$LEMMY_CONFIG"
-
-# -----------------------------------------------------------------
-# Start pict-rs
-# -----------------------------------------------------------------
-
-PICTRS_DATA="$PERSIST/pictrs"
-mkdir -p "$PICTRS_DATA/sled-repo" "$PICTRS_DATA/files" "$PICTRS_DATA/exports"
-chown -R lemmy:lemmy "$PICTRS_DATA"
-echo "[start.sh] Starting pict-rs on 127.0.0.1:8081"
-PICTRS__SERVER__ADDRESS="127.0.0.1:8081" \
-PICTRS__SERVER__API_KEY="$PICTRS_API_KEY" \
-PICTRS__TRACING__LOGGING__TARGETS=warn \
-PICTRS__TRACING__LOGGING__NO_ANSI=true \
-PICTRS__REPO__PATH="$PICTRS_DATA/sled-repo" \
-PICTRS__REPO__EXPORT_PATH="$PICTRS_DATA/exports" \
-PICTRS__STORE__PATH="$PICTRS_DATA/files" \
-gosu lemmy /usr/local/bin/pict-rs run &
-PICTRS_PID=$!
-
-PICTRS_READY=0
-for _ in $(seq 1 60); do
-    if curl -fsS "http://127.0.0.1:8081/healthz" >/dev/null; then
-        PICTRS_READY=1
-        break
-    fi
-    if ! kill -0 "$PICTRS_PID" 2>/dev/null; then
-        break
-    fi
-    sleep 1
-done
-if [[ "$PICTRS_READY" != "1" ]]; then
-    echo "[start.sh] pict-rs failed readiness"
-    exit 1
-fi
 
 # -----------------------------------------------------------------
 # Start lemmy_server
@@ -495,7 +458,7 @@ BOOTSTRAP_PID=$!
 # -----------------------------------------------------------------
 
 set +e
-wait -n "$PG_PID" "$PICTRS_PID" "$NGINX_PID" "$LEMMY_PID" "$UI_PID" "$BRIDGE_PID" "$BOUNCE_PID"
+wait -n "$PG_PID" "$NGINX_PID" "$LEMMY_PID" "$UI_PID" "$BRIDGE_PID" "$BOUNCE_PID"
 EXIT_CODE=$?
 set -e
 
