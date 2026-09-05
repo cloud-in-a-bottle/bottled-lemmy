@@ -89,6 +89,12 @@ OIDC_PROVIDER_ID_FILE = os.environ.get(
 )
 
 PROVIDER_DISPLAY = "OpenHost"
+DEFAULT_SITE_SIDEBAR = """**About this instance**
+
+This Cloud in a Bottle package supports text posts, link posts, comments, votes,
+and ActivityPub federation. Image uploads, avatars, thumbnails, and proxied remote
+images are unavailable because pict-rs is not bundled.
+"""
 
 
 def _request(
@@ -459,6 +465,23 @@ def _ensure_registration_mode(
         raise SystemExit(1)
 
 
+def _ensure_default_site_sidebar(jwt_token: str, site: dict) -> None:
+    """Explain the image limitation in-product without replacing owner content."""
+    current = site.get("site_view", {}).get("site", {}).get("sidebar")
+    if isinstance(current, str) and current.strip():
+        return
+    status, _ = _request(
+        "PUT", "/site", {"sidebar": DEFAULT_SITE_SIDEBAR}, auth=jwt_token
+    )
+    if status >= 400:
+        print(
+            f"[bootstrap] FATAL: PUT /site (default sidebar) returned status={status}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    print("[bootstrap] installed the default image-support notice")
+
+
 def _find_person_id(jwt_token: str, username: str) -> int | None:
     """Look up a local person's id by username.  Returns None if no
     such user exists yet.
@@ -611,6 +634,7 @@ def main() -> int:
         "closed" if _find_person_id(jwt_token, SSO_USERNAME) is not None else "open"
     )
     _ensure_registration_mode(jwt_token, local_site, desired_registration_mode)
+    _ensure_default_site_sidebar(jwt_token, site)
 
     admins = site.get("admins") or []
     _ensure_admin(jwt_token, admins)

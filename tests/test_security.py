@@ -133,6 +133,19 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertNotIn("bcrypt-secret", stderr.getvalue())
         self.assertIn("timed out after 30 seconds", stderr.getvalue())
 
+    def test_default_sidebar_is_created_once_without_overwriting_owner_content(self):
+        empty_site = {"site_view": {"site": {}}}
+        custom_site = {"site_view": {"site": {"sidebar": "Owner content"}}}
+        with patch.object(
+            self.bootstrap, "_request", return_value=(200, {})
+        ) as request:
+            self.bootstrap._ensure_default_site_sidebar("token", empty_site)
+            self.bootstrap._ensure_default_site_sidebar("token", custom_site)
+
+        request.assert_called_once()
+        body = request.call_args.args[2]
+        self.assertIn("pict-rs is not bundled", body["sidebar"])
+
 
 if __name__ == "__main__":
     unittest.main()
