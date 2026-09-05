@@ -38,6 +38,10 @@ class PackagingTests(unittest.TestCase):
             start.index("BOOTSTRAP_MODE=reconcile"),
             start.index('echo "[start.sh] Starting nginx'),
         )
+        self.assertLess(
+            start.index('echo "[start.sh] Waiting for UI and SSO services'),
+            start.index('echo "[start.sh] Starting nginx'),
+        )
         self.assertIn('wait -n "$PG_PID"', start)
 
     def test_catalog_documentation_sections_and_license_exist(self):

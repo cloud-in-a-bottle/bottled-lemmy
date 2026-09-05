@@ -17,7 +17,8 @@ owner sign-in.
 
 Open `https://lemmy.<zone>/`. The first visit briefly redirects through Cloud in
 a Bottle SSO, creates a Lemmy account matching the owner's zone username, and
-promotes it to admin. Later visits reuse the Lemmy session.
+promotes it to admin, then closes local registration. Later visits reuse the
+Lemmy session.
 
 To follow a remote community, search for its federated name, such as
 `!linux@lemmy.ml`, open it, and select Subscribe. New activities then arrive

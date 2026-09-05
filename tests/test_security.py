@@ -101,8 +101,9 @@ class SecurityBoundaryTests(unittest.TestCase):
             "location = /api/v4/account/auth/register { return 403; }", config
         )
         self.assertIn("location = /api/v3/user/register { return 403; }", config)
-        self.assertIn("map $http_accept $actor_upstream", config)
-        self.assertIn("proxy_pass $actor_upstream;", config)
+        self.assertIn('map "$request_method:$http_accept" $app_upstream', config)
+        self.assertIn("proxy_pass $app_upstream;", config)
+        self.assertNotIn("proxy_intercept_errors on", config)
 
     def test_password_reset_keeps_credentials_out_of_process_arguments(self):
         completed = CompletedProcess([], 0, stdout="12\nUPDATE 1\n", stderr="")

@@ -213,8 +213,13 @@ async def bounce(request: Request) -> Response:
     )
 
 
+async def healthz(_: Request) -> Response:
+    return Response("ok\n", media_type="text/plain")
+
+
 routes = [
     Route("/sso-bounce", bounce),
+    Route("/sso-bounce/healthz", healthz),
 ]
 
 app: Starlette = Starlette(debug=False, routes=routes)

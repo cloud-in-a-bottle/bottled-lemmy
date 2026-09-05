@@ -326,7 +326,7 @@ def _provider_payload() -> dict:
         "auto_verify_email": True,
         "auto_approve_application": True,
         "account_linking_enabled": True,
-        "use_pkce": True,
+        "use_pkce": False,
         "enabled": True,
     }
 
@@ -422,8 +422,10 @@ def _write_provider_id(provider_id: int) -> None:
     os.replace(temp_path, path)
 
 
-def _ensure_open_registration(jwt_token: str, local_site: dict) -> None:
-    """Set ``registration_mode = open`` if it isn't already.
+def _ensure_registration_mode(
+    jwt_token: str, local_site: dict, desired_mode: str
+) -> None:
+    """Set the registration mode required by the owner lifecycle.
 
     The OIDC user-creation path through ``/oauth/authenticate``
     creates a new Lemmy user the first time a given OIDC ``sub`` is
@@ -431,23 +433,21 @@ def _ensure_open_registration(jwt_token: str, local_site: dict) -> None:
     creation is rejected with ``registration_application_answer_required``
     because the OIDC flow has no field to carry the
     application-question answer. The public nginx boundary blocks
-    Lemmy's native registration endpoints, so only the owner-gated
-    OIDC flow can use this otherwise-open backend setting. Remote
-    federated users on other instances are not affected.
+    native registration throughout. Once the owner exists, ``closed``
+    also removes Lemmy's signup affordances for public visitors.
     """
-    if local_site.get("registration_mode") == "open":
-        print("[bootstrap] registration_mode is already 'open'")
+    if local_site.get("registration_mode") == desired_mode:
+        print(f"[bootstrap] registration_mode is already {desired_mode!r}")
         return
 
     print(
         f"[bootstrap] flipping registration_mode "
-        f"({local_site.get('registration_mode')!r} -> 'open') so OIDC user "
-        f"creation can complete without an application answer"
+        f"({local_site.get('registration_mode')!r} -> {desired_mode!r})"
     )
     status, payload = _request(
         "PUT",
         "/site",
-        {"registration_mode": "open"},
+        {"registration_mode": desired_mode},
         auth=jwt_token,
     )
     if status >= 400:
@@ -514,8 +514,8 @@ def _ensure_admin(jwt_token: str, admins: list[dict]) -> None:
 def _watch_for_sso_user_and_promote(
     jwt_token: str,
     poll_interval_seconds: int = 30,
-    max_seconds: int = 24 * 60 * 60,
-) -> None:
+    max_seconds: int = 12 * 60 * 60,
+) -> bool:
     """After initial reconciliation, stay alive polling for the
     ``SSO_USERNAME`` user and promote them to admin once they appear.
 
@@ -524,23 +524,24 @@ def _watch_for_sso_user_and_promote(
     once per ``poll_interval_seconds`` is a low-cost way to bridge
     that gap without coupling the OIDC bridge to the Lemmy admin API
     (which would require giving the bridge access to the admin
-    password).  Exits cleanly once the user is promoted; bounded by
-    ``max_seconds`` so a deployment where SSO is never used doesn't
-    leave us spinning forever.
+    password). Returns once the user is promoted or the current
+    authentication window reaches ``max_seconds``.
 
     The admin JWT we got at boot stays valid for Lemmy's default
     24h, so this loop works without re-authentication for the
-    full ``max_seconds`` window.  If the deployment runs longer
-    than that without an SSO sign-in, the next container restart
-    re-enters this loop with a fresh JWT.
+    full ``max_seconds`` window. The caller refreshes authentication
+    and starts another window until the owner signs in.
     """
     deadline = time.time() + max_seconds
     while time.time() < deadline:
         site = _site(jwt_token)
         admins = site.get("admins") or []
         if any(a.get("person", {}).get("name") == SSO_USERNAME for a in admins):
+            _ensure_registration_mode(
+                jwt_token, site.get("site_view", {}).get("local_site", {}), "closed"
+            )
             print(f"[bootstrap] {SSO_USERNAME!r} is admin; watcher exiting")
-            return
+            return True
         person_id = _find_person_id(jwt_token, SSO_USERNAME)
         if person_id is not None:
             print(
@@ -559,15 +560,22 @@ def _watch_for_sso_user_and_promote(
                     file=sys.stderr,
                 )
             else:
+                refreshed_site = _site(jwt_token)
+                _ensure_registration_mode(
+                    jwt_token,
+                    refreshed_site.get("site_view", {}).get("local_site", {}),
+                    "closed",
+                )
                 print(
                     f"[bootstrap] {SSO_USERNAME!r} promoted to admin; watcher exiting"
                 )
-                return
+                return True
         time.sleep(poll_interval_seconds)
     print(
         f"[bootstrap] watcher window of {max_seconds}s elapsed without seeing "
-        f"{SSO_USERNAME!r}; will be re-tried on the next container restart"
+        f"{SSO_USERNAME!r}; refreshing admin authentication"
     )
+    return False
 
 
 def main() -> int:
@@ -588,7 +596,9 @@ def main() -> int:
     site = _site(jwt_token)
 
     if BOOTSTRAP_MODE == "watch":
-        _watch_for_sso_user_and_promote(jwt_token)
+        while not _watch_for_sso_user_and_promote(jwt_token):
+            login_username = _reset_admin_password_in_db() or ADMIN_USERNAME
+            jwt_token = _login(login_username)
         print("[bootstrap] watcher done")
         return 0
 
@@ -597,7 +607,10 @@ def main() -> int:
     _write_provider_id(provider_id)
 
     local_site = site.get("site_view", {}).get("local_site", {})
-    _ensure_open_registration(jwt_token, local_site)
+    desired_registration_mode = (
+        "closed" if _find_person_id(jwt_token, SSO_USERNAME) is not None else "open"
+    )
+    _ensure_registration_mode(jwt_token, local_site, desired_registration_mode)
 
     admins = site.get("admins") or []
     _ensure_admin(jwt_token, admins)

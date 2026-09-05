@@ -267,6 +267,19 @@ if [[ "$LEMMY_READY" != "1" ]]; then
     exit 1
 fi
 
+# Deploys predating the reserved provisioner username used "owner" for
+# that internal account. Avoid asking OIDC to create a colliding SSO user.
+if [[ "$SSO_USERNAME" == "owner" ]]; then
+    LEGACY_OWNER_EXISTS="$(gosu postgres "$PG_BIN/psql" -d lemmy -tAc \
+        "SELECT 1 FROM person WHERE name='owner' AND local=true" || true)"
+    PROVISIONER_EXISTS="$(gosu postgres "$PG_BIN/psql" -d lemmy -tAc \
+        "SELECT 1 FROM person WHERE name='openhost-provisioner' AND local=true" || true)"
+    if [[ "$LEGACY_OWNER_EXISTS" == "1" && "$PROVISIONER_EXISTS" != "1" ]]; then
+        echo "[start.sh] legacy provisioner owns the 'owner' name; using 'openhost' for SSO"
+        SSO_USERNAME="openhost"
+    fi
+fi
+
 # -----------------------------------------------------------------
 # Start lemmy-ui
 # -----------------------------------------------------------------
@@ -387,6 +400,27 @@ LEMMY_OAUTH_PROVIDER_ID="$LEMMY_OAUTH_PROVIDER_ID" \
 SSO_USERNAME="$SSO_USERNAME" \
 gosu lemmy python3 -m uvicorn --host 127.0.0.1 --port 7100 --log-level warning --app-dir /opt/openhost-lemmy sso_bounce:app &
 BOUNCE_PID=$!
+
+echo "[start.sh] Waiting for UI and SSO services..."
+SERVICES_READY=0
+for _ in $(seq 1 60); do
+    if curl -fsS -H "Host: $APP_HOST" "http://127.0.0.1:1234/" >/dev/null \
+        && curl -fsS "http://127.0.0.1:7000/_oidc/healthz" >/dev/null \
+        && curl -fsS "http://127.0.0.1:7100/sso-bounce/healthz" >/dev/null; then
+        SERVICES_READY=1
+        break
+    fi
+    if ! kill -0 "$UI_PID" 2>/dev/null \
+        || ! kill -0 "$BRIDGE_PID" 2>/dev/null \
+        || ! kill -0 "$BOUNCE_PID" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+if [[ "$SERVICES_READY" != "1" ]]; then
+    echo "[start.sh] UI or SSO service failed readiness"
+    exit 1
+fi
 
 # -----------------------------------------------------------------
 # Start nginx
